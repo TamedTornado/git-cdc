@@ -69,5 +69,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-audit
-      - run: cargo audit
+      # sqlx records its disabled MySQL driver's unpatched rsa dependency in
+      # Cargo.lock; `cargo tree -i rsa --target all` proves it is not compiled.
+      - run: cargo audit --ignore RUSTSEC-2023-0071
       - run: cargo deny check
