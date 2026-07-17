@@ -28,6 +28,41 @@ The first command prints the stable repository UUID. Forgejo mode obtains
 permissions from Forgejo and does not require grants. OIDC grants are
 repository-scoped; `--admin` implies read/write and permits forced unlock.
 
+`repository-add` is idempotent: rerunning it for the same owner/name prints
+the existing stable UUID.
+
+## Forgejo reference integration
+
+Forgejo 15 LTS is the beta reference forge. Start Git-CDC in `forgejo` mode
+with the externally reachable Forgejo root URL:
+
+```console
+export GIT_CDC_AUTH_MODE=forgejo
+export GIT_CDC_FORGEJO_URL=https://forge.example/
+```
+
+Provision the matching owner/repository in Git-CDC, then route
+`/OWNER/REPOSITORY/info/lfs` to Git-CDC at the reverse proxy. A separate LFS
+host is also supported; configure it in the Git checkout with:
+
+```console
+git-cdc install --scope local
+git-cdc configure --scope local --url https://lfs.example/OWNER/REPOSITORY/info/lfs
+```
+
+Forgejo personal access tokens used for Git-CDC need `read:user` plus
+`read:repository` for downloads or `write:repository` for uploads and locks.
+Repository-specific tokens are supported. Store credentials through Git's
+credential machinery; do not put tokens in the LFS URL. Git-CDC forwards the
+caller's authorization to Forgejo for both the current-user and repository
+permission checks on every request, so revocation and permission changes do
+not wait for a cache to expire.
+
+The integration suite creates a real private Forgejo repository, performs a
+Git push whose LFS object uses CDC, clones and verifies the bytes through CDC,
+uninstalls Git-CDC, then cold-fetches and verifies the same standard pointer
+with stock Git LFS.
+
 ## Reachability and garbage collection
 
 Reconciliation uses an ordinary read-only Git URL and Git credential helpers:

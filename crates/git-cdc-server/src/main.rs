@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = required("GIT_CDC_DATABASE_URL")?;
     let base_url = Url::parse(&required("GIT_CDC_BASE_URL")?)?;
     let storage_url = Url::parse(&required("GIT_CDC_STORAGE_URL")?)?;
+    let auth_mode = required("GIT_CDC_AUTH_MODE")?;
     let bind: SocketAddr = std::env::var("GIT_CDC_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())
         .parse()?;
@@ -33,11 +34,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (store, prefix) = object_store::parse_url_opts(&storage_url, std::env::vars())?;
     let store = PrefixStore::new(store, prefix);
     let chunks = ChunkStore::new(Arc::new(store));
-    let auth_mode = match std::env::var("GIT_CDC_AUTH_MODE") {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => "development".into(),
-        Err(error) => return Err(error.into()),
-    };
     let state = match auth_mode.as_str() {
         "forgejo" => AppState::new_forgejo(
             pool,

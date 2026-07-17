@@ -52,6 +52,7 @@ The server fails closed if any required setting is absent:
 ```console
 export GIT_CDC_DATABASE_URL=postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc
 export GIT_CDC_BASE_URL=http://127.0.0.1:8080/
+export GIT_CDC_AUTH_MODE=development
 export GIT_CDC_DEV_TOKEN=replace-this-development-token
 export GIT_CDC_STORAGE_URL=file:///var/lib/git-cdc
 cargo run -p git-cdc-server

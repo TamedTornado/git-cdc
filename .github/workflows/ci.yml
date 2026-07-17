@@ -54,6 +54,10 @@ jobs:
           GIT_CDC_TEST_DATABASE_URL: postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc
           GIT_CDC_TEST_MINIO: "1"
         run: cargo test --workspace --locked
+      - name: Build Forgejo reference binaries
+        run: cargo build --locked -p git-cdc -p git-cdc-server --bins
+      - name: Stock and CDC clients share a real Forgejo repository
+        run: bash tests/forgejo_e2e.sh
       - name: Dependency logs on failure
         if: failure()
         run: docker compose -f docker-compose.test.yml logs

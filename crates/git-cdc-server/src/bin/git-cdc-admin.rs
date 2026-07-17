@@ -55,12 +55,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::RepositoryAdd { owner, name } => {
             let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO repositories (id, owner, name) VALUES ($1, $2, $3)")
-                .bind(id)
-                .bind(owner)
-                .bind(name)
-                .execute(&pool)
-                .await?;
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO repositories (id, owner, name) VALUES ($1, $2, $3) \
+                 ON CONFLICT (owner, name) DO UPDATE SET owner = EXCLUDED.owner \
+                 RETURNING id",
+            )
+            .bind(id)
+            .bind(owner)
+            .bind(name)
+            .fetch_one(&pool)
+            .await?;
             println!("{id}");
         }
         Commands::Grant {
