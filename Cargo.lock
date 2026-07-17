@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "axum",
  "blake3",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-protocol"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "git-cdc-core",
  "serde",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-server"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "axum",
  "bytes",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-storage"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "blake3",
  "bytes",

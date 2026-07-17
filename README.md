@@ -6,9 +6,8 @@ installing the native `git-cdc` custom transfer agent additionally allows a
 client to upload and download only chunks it does not already share with the
 server.
 
-The project is currently an alpha implementation moving toward its first
-usable beta. The design and complete beta acceptance criteria are recorded in
-[the project plan](docs/PROJECT_PLAN.md).
+The project is a usable `0.1.0-beta.1`. Its design and exercised beta
+acceptance criteria are recorded in [the project plan](docs/PROJECT_PLAN.md).
 
 ## Compatibility promise
 
@@ -18,7 +17,7 @@ usable beta. The design and complete beta acceptance criteria are recorded in
 - Git-CDC-aware clients negotiate a chunk-aware transfer path.
 - Forgejo is the first reference integration, not a core dependency.
 
-## Implemented alpha
+## Implemented beta
 
 - Deterministic streaming FastCDC manifests with SHA-256/BLAKE3 integrity.
 - A native `git-lfs` custom-transfer client with resumable uploads, verified
@@ -62,7 +61,7 @@ cargo run -p git-cdc-server
 URLs; the corresponding provider credentials are read from environment
 variables supported by `object_store`.
 
-Create repository mappings explicitly in PostgreSQL during the alpha. Then
+Create repository mappings explicitly with `git-cdc-admin repository-add`. Then
 point a repository's LFS endpoint at
 `https://host/OWNER/REPOSITORY/info/lfs`, configure authentication through
 Git's HTTP configuration or credential machinery, and run:

@@ -13,9 +13,9 @@ axum.workspace = true
 bytes.workspace = true
 clap.workspace = true
 futures-util.workspace = true
-git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-alpha.1" }
-git-cdc-protocol = { path = "../git-cdc-protocol", version = "0.1.0-alpha.1" }
-git-cdc-storage = { path = "../git-cdc-storage", version = "0.1.0-alpha.1" }
+git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-beta.1" }
+git-cdc-protocol = { path = "../git-cdc-protocol", version = "0.1.0-beta.1" }
+git-cdc-storage = { path = "../git-cdc-storage", version = "0.1.0-beta.1" }
 hex.workspace = true
 jsonwebtoken.workspace = true
 object_store.workspace = true
@@ -36,7 +36,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-git-cdc = { path = "../git-cdc-client", version = "0.1.0-alpha.1" }
+git-cdc = { path = "../git-cdc-client", version = "0.1.0-beta.1" }
 http-body-util = "0.1"
 serial_test.workspace = true
 tower.workspace = true
