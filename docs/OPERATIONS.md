@@ -72,6 +72,7 @@ git-cdc-admin reconcile REPOSITORY_UUID GIT_URL
 git-cdc-admin gc-dry-run REPOSITORY_UUID
 git-cdc-admin gc-stage REPOSITORY_UUID --grace-seconds 604800
 git-cdc-admin gc-collect REPOSITORY_UUID
+git-cdc-admin uploads-reclaim REPOSITORY_UUID --grace-seconds 86400
 ```
 
 The reconciler creates a fresh mirror, fingerprints all refs, validates every
@@ -83,6 +84,11 @@ It is then staged behind the configured grace period. Metadata deletion and
 chunk-provider deletion are separated by a durable cleanup queue, making a
 crash or provider outage safe to retry. Without two complete epochs, completed
 objects are retained indefinitely. Always inspect `gc-dry-run` before staging.
+
+Expired incomplete uploads are marked separately from completed objects.
+`uploads-reclaim` removes only sessions beyond its quarantine grace period and
+only chunks with no completed-object reference and no active upload reference.
+Provider failures remain in the same durable cleanup queue for retry.
 
 ## Health and metrics
 

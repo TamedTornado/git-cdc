@@ -45,6 +45,12 @@ enum Commands {
     },
     /// Deletes due tombstones and drains crash-retryable chunk cleanup.
     GcCollect { repository_id: Uuid },
+    /// Reclaims expired partial uploads after a quarantine grace period.
+    UploadsReclaim {
+        repository_id: Uuid,
+        #[arg(long, default_value_t = 86_400)]
+        grace_seconds: u64,
+    },
 }
 
 #[tokio::main]
@@ -126,6 +132,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "deleted {} objects",
                 gc::collect_due(&pool, &chunks, repository_id).await?
+            );
+        }
+        Commands::UploadsReclaim {
+            repository_id,
+            grace_seconds,
+        } => {
+            let storage_url = Url::parse(&required("GIT_CDC_STORAGE_URL")?)?;
+            let (store, prefix) = object_store::parse_url_opts(&storage_url, std::env::vars())?;
+            let chunks = ChunkStore::new(Arc::new(PrefixStore::new(store, prefix)));
+            println!(
+                "reclaimed {} expired upload sessions",
+                gc::reclaim_expired_uploads(
+                    &pool,
+                    &chunks,
+                    repository_id,
+                    Duration::from_secs(grace_seconds),
+                )
+                .await?
             );
         }
     }

@@ -112,3 +112,94 @@ async fn lock_list_conflict_and_unlock_follow_lfs_contract() {
         serde_json::from_slice(&unlocked.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body.lock, lock);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn lock_listing_and_verification_paginate_with_stable_cursors() {
+    let app = setup().await;
+    for path in ["art/a.glb", "art/b.glb", "art/c.glb"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    "POST",
+                    "/team/assets/info/lfs/locks",
+                    &format!(r#"{{"path":"{path}"}}"#),
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+
+    let first: LockList = serde_json::from_slice(
+        &app.clone()
+            .oneshot(request("GET", "/team/assets/info/lfs/locks?limit=2", ""))
+            .await
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(first.locks.len(), 2);
+    let cursor = first.next_cursor.unwrap();
+    let second: LockList = serde_json::from_slice(
+        &app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/team/assets/info/lfs/locks?limit=2&cursor={cursor}"),
+                "",
+            ))
+            .await
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(second.locks.len(), 1);
+    assert!(second.next_cursor.is_none());
+
+    let filtered: LockList = serde_json::from_slice(
+        &app.clone()
+            .oneshot(request(
+                "GET",
+                "/team/assets/info/lfs/locks?path=art%2Fb.glb",
+                "",
+            ))
+            .await
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(filtered.locks.len(), 1);
+    assert_eq!(filtered.locks[0].path, "art/b.glb");
+
+    let verified: LockVerifyResponse = serde_json::from_slice(
+        &app.oneshot(request(
+            "POST",
+            "/team/assets/info/lfs/locks/verify",
+            r#"{"limit":1}"#,
+        ))
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(verified.ours.len(), 1);
+    assert!(verified.theirs.is_empty());
+    assert!(verified.next_cursor.is_some());
+}

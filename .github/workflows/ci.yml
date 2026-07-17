@@ -58,6 +58,8 @@ jobs:
         run: cargo build --locked -p git-cdc -p git-cdc-server --bins
       - name: Stock and CDC clients share a real Forgejo repository
         run: bash tests/forgejo_e2e.sh
+      - name: PostgreSQL and object storage restore into a working service
+        run: bash tests/backup_restore_e2e.sh
       - name: Dependency logs on failure
         if: failure()
         run: docker compose -f docker-compose.test.yml logs

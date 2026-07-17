@@ -9,11 +9,13 @@ use std::sync::{
 use axum::{
     Json, Router,
     body::Body,
-    http::{Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
     routing::get,
 };
+use git_cdc_protocol::LockResponse;
 use git_cdc_server::{AppState, build_router, migrate};
 use git_cdc_storage::ChunkStore;
+use http_body_util::BodyExt;
 use object_store::memory::InMemory;
 use serde_json::json;
 use sqlx::PgPool;
@@ -104,6 +106,123 @@ async fn forgejo_checks_repository_permission_on_every_request_and_observes_revo
     assert_eq!(
         app.oneshot(batch()).await.unwrap().status(),
         StatusCode::UNAUTHORIZED
+    );
+    task.abort();
+}
+
+fn forgejo_request(token: &str, method: &str, uri: &str, body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn forgejo_enforces_read_write_lock_ownership_and_administrative_force() {
+    let forgejo = Router::new()
+        .route(
+            "/api/v1/user",
+            get(|headers: HeaderMap| async move {
+                let token = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap();
+                let login = token.strip_prefix("Bearer ").unwrap();
+                (StatusCode::OK, Json(json!({"login":login})))
+            }),
+        )
+        .route(
+            "/api/v1/repos/{owner}/{repo}",
+            get(|headers: HeaderMap| async move {
+                let token = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap();
+                let reader = token == "Bearer reader";
+                let admin = token == "Bearer admin";
+                (
+                    StatusCode::OK,
+                    Json(json!({"permissions":{"pull":true,"push":!reader,"admin":admin}})),
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let forgejo_url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, forgejo).await.unwrap() });
+    let app = build_router(
+        AppState::new_forgejo(
+            database().await,
+            ChunkStore::new(Arc::new(InMemory::new())),
+            Url::parse("http://git-cdc.example/").unwrap(),
+            forgejo_url,
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(forgejo_request(
+                "reader",
+                "POST",
+                "/team/assets/info/lfs/objects/batch",
+                r#"{"operation":"download","objects":[]}"#,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(forgejo_request(
+                "reader",
+                "POST",
+                "/team/assets/info/lfs/objects/batch",
+                r#"{"operation":"upload","objects":[]}"#,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let created = app
+        .clone()
+        .oneshot(forgejo_request(
+            "alice",
+            "POST",
+            "/team/assets/info/lfs/locks",
+            r#"{"path":"art/hero.glb"}"#,
+        ))
+        .await
+        .unwrap();
+    let lock: LockResponse =
+        serde_json::from_slice(&created.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let unlock_uri = format!("/team/assets/info/lfs/locks/{}/unlock", lock.lock.id);
+    for body in [r#"{"force":false}"#, r#"{"force":true}"#] {
+        assert_eq!(
+            app.clone()
+                .oneshot(forgejo_request("bob", "POST", &unlock_uri, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        app.oneshot(forgejo_request(
+            "admin",
+            "POST",
+            &unlock_uri,
+            r#"{"force":true}"#,
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
     );
     task.abort();
 }

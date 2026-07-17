@@ -191,6 +191,72 @@ pub async fn collect_due(
         transaction.commit().await?;
         deleted += 1;
     }
+    drain_chunk_queue(pool, chunks, repository_id).await?;
+    Ok(deleted)
+}
+
+/// Expires abandoned uploads and reclaims their unreferenced chunks after a grace period.
+///
+/// # Errors
+///
+/// Returns database or provider errors. Provider failures leave durable queue
+/// entries which a later invocation safely retries.
+pub async fn reclaim_expired_uploads(
+    pool: &PgPool,
+    chunks: &ChunkStore,
+    repository_id: Uuid,
+    grace: Duration,
+) -> Result<u64, GcError> {
+    let seconds = i64::try_from(grace.as_secs())
+        .map_err(|_| sqlx::Error::Protocol("upload grace period is too large".into()))?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE upload_sessions SET state = 'expired' \
+         WHERE repository_id = $1 AND state = 'open' AND expires_at <= now()",
+    )
+    .bind(repository_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chunk_gc_queue (repository_id, chunk_id) \
+         SELECT DISTINCT c.repository_id, c.chunk_id \
+         FROM chunks c \
+         JOIN upload_session_chunks usc \
+           ON usc.repository_id = c.repository_id AND usc.chunk_id = c.chunk_id \
+         JOIN upload_sessions expired ON expired.id = usc.session_id \
+         WHERE c.repository_id = $1 AND c.reference_count = 0 \
+           AND expired.state = 'expired' \
+           AND expired.expires_at <= now() - make_interval(secs => $2) \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM upload_session_chunks active_chunks \
+             JOIN upload_sessions active ON active.id = active_chunks.session_id \
+             WHERE active_chunks.repository_id = c.repository_id \
+               AND active_chunks.chunk_id = c.chunk_id AND active.state = 'open' \
+           ) ON CONFLICT DO NOTHING",
+    )
+    .bind(repository_id)
+    .bind(seconds)
+    .execute(&mut *transaction)
+    .await?;
+    let removed = sqlx::query(
+        "DELETE FROM upload_sessions WHERE repository_id = $1 AND state = 'expired' \
+         AND expires_at <= now() - make_interval(secs => $2)",
+    )
+    .bind(repository_id)
+    .bind(seconds)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    transaction.commit().await?;
+    drain_chunk_queue(pool, chunks, repository_id).await?;
+    Ok(removed)
+}
+
+async fn drain_chunk_queue(
+    pool: &PgPool,
+    chunks: &ChunkStore,
+    repository_id: Uuid,
+) -> Result<(), GcError> {
     let queued: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT chunk_id FROM chunk_gc_queue WHERE repository_id = $1 ORDER BY queued_at",
     )
@@ -198,13 +264,54 @@ pub async fn collect_due(
     .fetch_all(pool)
     .await?;
     for raw in queued {
+        let mut transaction = pool.begin().await?;
+        let reference_count: Option<i64> = sqlx::query_scalar(
+            "SELECT reference_count FROM chunks \
+             WHERE repository_id = $1 AND chunk_id = $2 FOR UPDATE",
+        )
+        .bind(repository_id)
+        .bind(&raw)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(reference_count) = reference_count else {
+            sqlx::query("DELETE FROM chunk_gc_queue WHERE repository_id = $1 AND chunk_id = $2")
+                .bind(repository_id)
+                .bind(&raw)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            continue;
+        };
+        if reference_count > 0 {
+            sqlx::query("DELETE FROM chunk_gc_queue WHERE repository_id = $1 AND chunk_id = $2")
+                .bind(repository_id)
+                .bind(&raw)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            continue;
+        }
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 FROM upload_session_chunks usc \
+               JOIN upload_sessions s ON s.id = usc.session_id \
+               WHERE usc.repository_id = $1 AND usc.chunk_id = $2 AND s.state = 'open' \
+             )",
+        )
+        .bind(repository_id)
+        .bind(&raw)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active {
+            transaction.commit().await?;
+            continue;
+        }
         let bytes: [u8; 32] = raw
             .as_slice()
             .try_into()
             .map_err(|_| GcError::CorruptChunkId)?;
         let chunk_id = ChunkId::from_bytes(bytes);
         chunks.delete(repository_id, chunk_id).await?;
-        let mut transaction = pool.begin().await?;
         sqlx::query(
             "DELETE FROM chunks WHERE repository_id = $1 AND chunk_id = $2 AND reference_count = 0",
         )
@@ -219,7 +326,7 @@ pub async fn collect_due(
             .await?;
         transaction.commit().await?;
     }
-    Ok(deleted)
+    Ok(())
 }
 
 /// Safe-GC database, integrity, or storage failure.

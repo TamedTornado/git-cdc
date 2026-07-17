@@ -16,7 +16,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -30,7 +30,7 @@ use git_cdc_protocol::{
     LockVerifyResponse, Operation, TransferKind, UnlockRequest, UnlockResponse, select_transfer,
 };
 use git_cdc_storage::ChunkStore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use subtle::ConstantTimeEq;
@@ -84,6 +84,20 @@ struct Identity {
     authorization: String,
     subject: String,
     administrator: bool,
+}
+
+#[derive(Default, Deserialize)]
+struct LockListQuery {
+    path: Option<String>,
+    id: Option<Uuid>,
+    cursor: Option<Uuid>,
+    limit: Option<usize>,
+}
+
+#[derive(Default, Deserialize)]
+struct LockVerifyRequest {
+    cursor: Option<Uuid>,
+    limit: Option<usize>,
 }
 
 impl AppState {
@@ -332,27 +346,53 @@ async fn create_lock(
 async fn list_locks(
     State(state): State<AppState>,
     Path((owner, repository)): Path<(String, String)>,
+    Query(query): Query<LockListQuery>,
     headers: HeaderMap,
 ) -> Result<Json<LockList>, ApiError> {
     authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
-    Ok(Json(LockList {
-        locks: load_locks(&state, repository_id).await?,
-        next_cursor: None,
-    }))
+    let (locks, next_cursor) = load_locks_page(
+        &state,
+        repository_id,
+        query.path.as_deref(),
+        query.id,
+        query.cursor,
+        query.limit,
+    )
+    .await?;
+    Ok(Json(LockList { locks, next_cursor }))
 }
 
-async fn load_locks(state: &AppState, repository_id: Uuid) -> Result<Vec<Lock>, ApiError> {
-    let rows = sqlx::query_as::<_, (Uuid, String, String, String)>(
-        "SELECT id, path, owner_subject, \
+async fn load_locks_page(
+    state: &AppState,
+    repository_id: Uuid,
+    path: Option<&str>,
+    id: Option<Uuid>,
+    cursor: Option<Uuid>,
+    requested_limit: Option<usize>,
+) -> Result<(Vec<Lock>, Option<String>), ApiError> {
+    let limit = requested_limit.unwrap_or(100).clamp(1, 100);
+    let rows =
+        sqlx::query_as::<_, (Uuid, String, String, String)>(
+            "SELECT id, path, owner_subject, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
-         FROM lfs_locks WHERE repository_id = $1 ORDER BY created_at, id",
-    )
-    .bind(repository_id)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|error| ApiError::database(&error))?;
-    Ok(rows
+         FROM lfs_locks WHERE repository_id = $1 \
+           AND ($2::text IS NULL OR path = $2) \
+           AND ($3::uuid IS NULL OR id = $3) \
+           AND ($4::uuid IS NULL OR id > $4) \
+         ORDER BY id LIMIT $5",
+        )
+        .bind(repository_id)
+        .bind(path)
+        .bind(id)
+        .bind(cursor)
+        .bind(i64::try_from(limit + 1).map_err(|_| {
+            ApiError::new(StatusCode::BAD_REQUEST, "lock page limit is out of range")
+        })?)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    let mut locks: Vec<_> = rows
         .into_iter()
         .map(|(id, path, subject, locked_at)| Lock {
             id: id.to_string(),
@@ -360,24 +400,39 @@ async fn load_locks(state: &AppState, repository_id: Uuid) -> Result<Vec<Lock>, 
             locked_at,
             owner: LockOwner { name: subject },
         })
-        .collect())
+        .collect();
+    let has_more = locks.len() > limit;
+    locks.truncate(limit);
+    let next_cursor = has_more
+        .then(|| locks.last().map(|lock| lock.id.clone()))
+        .flatten();
+    Ok((locks, next_cursor))
 }
 
 async fn verify_locks(
     State(state): State<AppState>,
     Path((owner, repository)): Path<(String, String)>,
     headers: HeaderMap,
+    Json(request): Json<LockVerifyRequest>,
 ) -> Result<Json<LockVerifyResponse>, ApiError> {
-    let identity = authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
+    let identity = authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
-    let (ours, theirs) = load_locks(&state, repository_id)
-        .await?
+    let (locks, next_cursor) = load_locks_page(
+        &state,
+        repository_id,
+        None,
+        None,
+        request.cursor,
+        request.limit,
+    )
+    .await?;
+    let (ours, theirs) = locks
         .into_iter()
         .partition(|lock| lock.owner.name == identity.subject);
     Ok(Json(LockVerifyResponse {
         ours,
         theirs,
-        next_cursor: None,
+        next_cursor,
     }))
 }
 
@@ -462,6 +517,22 @@ async fn upload_basic(
     file.flush().await.map_err(ApiError::io)?;
 
     let source = temporary.reopen().map_err(ApiError::io)?;
+    let manifest = tokio::task::spawn_blocking(move || {
+        ChunkStream::new(source, git_cdc_core::ChunkingProfile::beta_v1())
+            .finish()
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(ApiError::join)?
+    .map_err(|message| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message))?;
+    if manifest.object_oid != oid {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "uploaded bytes do not match the requested object OID",
+        ));
+    }
+
+    let source = temporary.reopen().map_err(ApiError::io)?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     let producer = tokio::task::spawn_blocking(move || {
         let mut stream = ChunkStream::new(source, git_cdc_core::ChunkingProfile::beta_v1());
@@ -471,7 +542,10 @@ async fn upload_basic(
                 return Err("upload consumer stopped".to_owned());
             }
         }
-        stream.finish().map_err(|error| error.to_string())
+        stream
+            .finish()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     });
     while let Some(chunk) = receiver.recv().await {
         state
@@ -480,16 +554,10 @@ async fn upload_basic(
             .await
             .map_err(ApiError::storage)?;
     }
-    let manifest = producer
+    producer
         .await
         .map_err(ApiError::join)?
         .map_err(|message| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message))?;
-    if manifest.object_oid != oid {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "uploaded bytes do not match the requested object OID",
-        ));
-    }
     publish_manifest(&state, repository_id, &manifest).await?;
     state
         .metrics
@@ -580,6 +648,21 @@ async fn begin_cdc(
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let manifest_json = serde_json::to_value(&request.manifest)
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    sqlx::query(
+        "UPDATE upload_sessions SET state = 'expired' \
+         WHERE repository_id = $1 AND object_oid = $2 \
+           AND state = 'open' AND expires_at <= now()",
+    )
+    .bind(repository_id)
+    .bind(oid.as_bytes().as_slice())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| ApiError::database(&error))?;
     let (upload_id, expires_at) = sqlx::query_as::<_, (Uuid, String)>(
         "INSERT INTO upload_sessions (id, repository_id, object_oid, object_size, manifest, state, expires_at) \
          VALUES ($1, $2, $3, $4, $5, 'open', now() + interval '24 hours') \
@@ -594,9 +677,13 @@ async fn begin_cdc(
         ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "object is too large")
     })?)
     .bind(manifest_json)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(|error| ApiError::database(&error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ApiError::database(&error))?;
     let mut missing_chunk_indexes = Vec::new();
     for (index, descriptor) in request.manifest.chunks.iter().enumerate() {
         if !state
@@ -657,6 +744,16 @@ async fn upload_cdc_chunk(
     .bind(repository_id)
     .bind(descriptor.id.as_bytes().as_slice())
     .bind(i64::from(descriptor.length))
+    .execute(&state.pool)
+    .await
+    .map_err(|error| ApiError::database(&error))?;
+    sqlx::query(
+        "INSERT INTO upload_session_chunks (session_id, repository_id, chunk_id) \
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(upload_id)
+    .bind(repository_id)
+    .bind(descriptor.id.as_bytes().as_slice())
     .execute(&state.pool)
     .await
     .map_err(|error| ApiError::database(&error))?;

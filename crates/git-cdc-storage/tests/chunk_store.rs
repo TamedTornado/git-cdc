@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use git_cdc_core::ChunkId;
 use git_cdc_storage::{ChunkStore, StorageError};
-use object_store::{ObjectStore, memory::InMemory};
+use object_store::{
+    ObjectStore, ObjectStoreExt, PutPayload, RetryConfig, memory::InMemory, path::Path,
+};
 use uuid::Uuid;
 
 fn id(bytes: &[u8]) -> ChunkId {
@@ -93,4 +95,57 @@ async fn repository_namespaces_do_not_share_chunk_existence() {
 
     assert!(chunks.exists(first, chunk_id).await.unwrap());
     assert!(!chunks.exists(second, chunk_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn corrupt_provider_bytes_are_never_returned_as_valid_chunks() {
+    let provider = Arc::new(InMemory::new());
+    let chunks = ChunkStore::new(provider.clone());
+    let repository_id = Uuid::nil();
+    let content = bytes::Bytes::from_static(b"valid immutable bytes");
+    let chunk_id = id(&content);
+    chunks
+        .put_verified(repository_id, chunk_id, content)
+        .await
+        .unwrap();
+    let digest = chunk_id.to_string();
+    let path = Path::from(format!(
+        "repositories/{repository_id}/chunks/{}/{digest}",
+        &digest[..2]
+    ));
+    provider
+        .put(
+            &path,
+            PutPayload::from(bytes::Bytes::from_static(b"corrupt provider bytes")),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        chunks.get_verified(repository_id, chunk_id).await,
+        Err(StorageError::DigestMismatch { .. })
+    ));
+}
+
+#[tokio::test]
+async fn unavailable_provider_is_reported_without_claiming_chunk_absence() {
+    let provider = object_store::aws::AmazonS3Builder::new()
+        .with_bucket_name("unavailable")
+        .with_region("us-east-1")
+        .with_endpoint("http://127.0.0.1:9")
+        .with_access_key_id("test")
+        .with_secret_access_key("test")
+        .with_allow_http(true)
+        .with_retry(RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        })
+        .build()
+        .unwrap();
+    let chunks = ChunkStore::new(Arc::new(provider));
+
+    assert!(matches!(
+        chunks.exists(Uuid::nil(), id(b"not present")).await,
+        Err(StorageError::Provider(_))
+    ));
 }

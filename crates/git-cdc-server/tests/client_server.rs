@@ -48,6 +48,7 @@ async fn production_client_uploads_and_downloads_over_real_http() {
     let manifest = ChunkStream::new(Cursor::new(&source), ChunkingProfile::beta_v1())
         .finish()
         .unwrap();
+    let first_chunk = manifest.chunks[0].clone();
     let source_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(source_file.path(), &source).unwrap();
     let cache = tempfile::tempdir().unwrap();
@@ -75,14 +76,28 @@ async fn production_client_uploads_and_downloads_over_real_http() {
         action: Some(action),
     };
     let cache_path = cache.path().to_path_buf();
-    let downloaded = tokio::task::spawn_blocking(move || {
+    let (downloaded, recovered) = tokio::task::spawn_blocking(move || {
+        let corrupt_cache_root = cache_path.clone();
         let backend = HttpBackend::new(cache_path).unwrap();
         assert_eq!(backend.upload(&upload).unwrap(), upload.size);
-        backend.download(&download).unwrap()
+        let downloaded = backend.download(&download).unwrap();
+        let digest = first_chunk.id.to_string();
+        let corrupt_cache = corrupt_cache_root
+            .join("chunks")
+            .join(&digest[..2])
+            .join(digest);
+        fs::write(
+            corrupt_cache,
+            vec![0xff_u8; usize::try_from(first_chunk.length).unwrap()],
+        )
+        .unwrap();
+        let recovered = backend.download(&download).unwrap();
+        (downloaded, recovered)
     })
     .await
     .unwrap();
 
     assert_eq!(fs::read(downloaded.path).unwrap(), source);
+    assert_eq!(fs::read(recovered.path).unwrap(), source);
     server.abort();
 }

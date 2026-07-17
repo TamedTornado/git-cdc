@@ -80,6 +80,8 @@ git config http.extraheader "Authorization: Bearer $GIT_CDC_DEV_TOKEN"
 
 Deployment, provisioning, authentication, reconciliation, garbage collection,
 backup, and recovery are documented in [Operations](docs/OPERATIONS.md).
+The negotiated transfer and integrity contract is documented in
+[Protocol v1](docs/PROTOCOL.md).
 
 ## License
 

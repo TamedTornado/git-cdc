@@ -31,6 +31,34 @@ struct Claims<'a> {
     exp: u64,
 }
 
+fn signed_token(sub: &str, issuer: &str, audience: &str, exp: u64, secret: &[u8]) -> String {
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some("test".into());
+    encode(
+        &header,
+        &Claims {
+            sub,
+            iss: issuer,
+            aud: audience,
+            exp,
+        },
+        &EncodingKey::from_secret(secret),
+    )
+    .unwrap()
+}
+
+fn batch(token: &str, operation: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/team/assets/info/lfs/objects/batch")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+        .body(Body::from(format!(
+            r#"{{"operation":"{operation}","objects":[]}}"#
+        )))
+        .unwrap()
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn oidc_validates_signature_issuer_audience_and_database_grant() {
@@ -64,6 +92,8 @@ async fn oidc_validates_signature_issuer_audience_and_database_grant() {
         .unwrap();
     sqlx::query("INSERT INTO repository_grants (repository_id, subject, can_read, can_write) VALUES ($1, 'alice', true, true)")
         .bind(Uuid::nil()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO repository_grants (repository_id, subject, can_read, can_write) VALUES ($1, 'bob', true, false)")
+        .bind(Uuid::nil()).execute(&pool).await.unwrap();
     let state = AppState::new_oidc(
         pool,
         ChunkStore::new(Arc::new(InMemory::new())),
@@ -79,27 +109,52 @@ async fn oidc_validates_signature_issuer_audience_and_database_grant() {
         .unwrap()
         .as_secs()
         + 300;
-    let mut jwt_header = Header::new(Algorithm::HS256);
-    jwt_header.kid = Some("test".into());
-    let token = encode(
-        &jwt_header,
-        &Claims {
-            sub: "alice",
-            iss: &issuer,
-            aud: "git-cdc",
+    let valid = signed_token("alice", &issuer, "git-cdc", exp, b"super-secret");
+    assert_eq!(
+        app.clone()
+            .oneshot(batch(&valid, "upload"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let reader = signed_token("bob", &issuer, "git-cdc", exp, b"super-secret");
+    assert_eq!(
+        app.clone()
+            .oneshot(batch(&reader, "download"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(batch(&reader, "upload"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for invalid in [
+        signed_token("alice", &issuer, "git-cdc", exp - 600, b"super-secret"),
+        signed_token("alice", &issuer, "wrong-audience", exp, b"super-secret"),
+        signed_token(
+            "alice",
+            "https://wrong-issuer.invalid",
+            "git-cdc",
             exp,
-        },
-        &EncodingKey::from_secret(b"super-secret"),
-    )
-    .unwrap();
-    let request = Request::builder()
-        .method("POST")
-        .uri("/team/assets/info/lfs/objects/batch")
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
-        .body(Body::from(r#"{"operation":"upload","objects":[]}"#))
-        .unwrap();
-
-    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+            b"super-secret",
+        ),
+        signed_token("alice", &issuer, "git-cdc", exp, b"wrong-secret"),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(batch(&invalid, "download"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
     task.abort();
 }
