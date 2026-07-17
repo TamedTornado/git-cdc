@@ -671,7 +671,11 @@ async fn finalize_cdc(
     authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
-    let manifest = load_open_upload(&state, repository_id, oid, upload_id).await?;
+    let (manifest, already_finalized) =
+        load_finalizable_upload(&state, repository_id, oid, upload_id).await?;
+    if already_finalized {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let mut hasher = Sha256::new();
     for descriptor in &manifest.chunks {
         let bytes = state
@@ -1098,6 +1102,29 @@ async fn load_open_upload(
     serde_json::from_value(value).map_err(|error| ApiError::integrity(error.to_string()))
 }
 
+async fn load_finalizable_upload(
+    state: &AppState,
+    repository_id: Uuid,
+    oid: ObjectOid,
+    upload_id: Uuid,
+) -> Result<(ObjectManifest, bool), ApiError> {
+    let row: (serde_json::Value, String) = sqlx::query_as(
+        "SELECT manifest, state FROM upload_sessions \
+         WHERE id = $1 AND repository_id = $2 AND object_oid = $3 \
+           AND ((state = 'open' AND expires_at > now()) OR state = 'finalized')",
+    )
+    .bind(upload_id)
+    .bind(repository_id)
+    .bind(oid.as_bytes().as_slice())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| ApiError::database(&error))?
+    .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "upload session not found"))?;
+    let manifest =
+        serde_json::from_value(row.0).map_err(|error| ApiError::integrity(error.to_string()))?;
+    Ok((manifest, row.1 == "finalized"))
+}
+
 async fn publish_manifest(
     state: &AppState,
     repository_id: Uuid,
@@ -1214,6 +1241,9 @@ impl ApiError {
     }
 
     fn storage(error: git_cdc_storage::StorageError) -> Self {
+        if matches!(error, git_cdc_storage::StorageError::DigestMismatch { .. }) {
+            return Self::new(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
+        }
         tracing::error!(error = %error, "object storage request failed");
         drop(error);
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "object storage error")

@@ -832,7 +832,9 @@ dependencies = [
 name = "git-cdc"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "axum",
  "blake3",
+ "bytes",
  "clap",
  "directories",
  "git-cdc-core",
@@ -843,7 +845,9 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]

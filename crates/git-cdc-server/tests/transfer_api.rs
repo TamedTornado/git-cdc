@@ -116,6 +116,24 @@ async fn cdc_upload_resumes_finalizes_and_downloads_through_basic_lfs() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let response = app
+        .clone()
+        .oneshot(authenticated(
+            "POST",
+            &format!(
+                "/team/assets/info/lfs/objects/{oid}/cdc/{}/finalize",
+                plan.upload_id
+            ),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NO_CONTENT,
+        "retrying a successful finalize must be idempotent"
+    );
+
+    let response = app
         .oneshot(authenticated(
             "GET",
             &format!("/team/assets/info/lfs/objects/{oid}"),
@@ -128,6 +146,54 @@ async fn cdc_upload_resumes_finalizes_and_downloads_through_basic_lfs() {
         response.into_body().collect().await.unwrap().to_bytes(),
         Bytes::from(source)
     );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cdc_rejects_corrupt_chunk_bytes_as_a_client_integrity_error() {
+    let (_pool, app) = setup().await;
+    let mut stream = ChunkStream::new(
+        Cursor::new(vec![0x3c_u8; 600_000]),
+        ChunkingProfile::beta_v1(),
+    );
+    let chunks: Vec<_> = stream.by_ref().map(|chunk| chunk.unwrap()).collect();
+    let manifest = stream.finish().unwrap();
+    let oid = manifest.object_oid;
+    let request = BeginUploadRequest {
+        protocol_version: 1,
+        manifest,
+    };
+    let plan: BeginUploadResponse = serde_json::from_slice(
+        &app.clone()
+            .oneshot(authenticated(
+                "POST",
+                &format!("/team/assets/info/lfs/objects/{oid}/cdc"),
+                Body::from(serde_json::to_vec(&request).unwrap()),
+            ))
+            .await
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    let corrupt = Bytes::from(vec![0x4d_u8; chunks[0].data.len()]);
+
+    let response = app
+        .oneshot(authenticated(
+            "PUT",
+            &format!(
+                "/team/assets/info/lfs/objects/{oid}/cdc/{}/chunks/0",
+                plan.upload_id
+            ),
+            Body::from(corrupt),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
