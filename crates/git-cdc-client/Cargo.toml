@@ -12,8 +12,8 @@ authors.workspace = true
 blake3.workspace = true
 clap.workspace = true
 directories.workspace = true
-git-cdc-core = { path = "../git-cdc-core" }
-git-cdc-protocol = { path = "../git-cdc-protocol" }
+git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-alpha.1" }
+git-cdc-protocol = { path = "../git-cdc-protocol", version = "0.1.0-alpha.1" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

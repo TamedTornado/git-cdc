@@ -12,9 +12,9 @@ authors.workspace = true
 axum.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
-git-cdc-core = { path = "../git-cdc-core" }
-git-cdc-protocol = { path = "../git-cdc-protocol" }
-git-cdc-storage = { path = "../git-cdc-storage" }
+git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-alpha.1" }
+git-cdc-protocol = { path = "../git-cdc-protocol", version = "0.1.0-alpha.1" }
+git-cdc-storage = { path = "../git-cdc-storage", version = "0.1.0-alpha.1" }
 object_store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,7 +32,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-git-cdc = { path = "../git-cdc-client" }
+git-cdc = { path = "../git-cdc-client", version = "0.1.0-alpha.1" }
 http-body-util = "0.1"
 serial_test.workspace = true
 tower.workspace = true

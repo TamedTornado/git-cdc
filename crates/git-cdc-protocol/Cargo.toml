@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-git-cdc-core = { path = "../git-cdc-core" }
+git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-alpha.1" }
 serde.workspace = true
 thiserror.workspace = true
 url.workspace = true
