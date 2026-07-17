@@ -101,3 +101,41 @@ async fn missing_credentials_are_rejected_before_repository_disclosure() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn readiness_checks_postgres_and_metrics_are_prometheus_text() {
+    let (_pool, app) = setup().await;
+    let ready = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::NO_CONTENT);
+    let metrics = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        metrics
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("git_cdc_logical_upload_bytes_total 0"));
+    assert!(body.contains("git_cdc_received_chunk_bytes_total 0"));
+}

@@ -1,6 +1,17 @@
 //! Forge-neutral Git LFS and CDC service.
 
-use std::{collections::BTreeMap, io::SeekFrom, str::FromStr};
+pub mod gc;
+pub mod reconcile;
+
+use std::{
+    collections::{BTreeMap, HashMap},
+    io::SeekFrom,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use axum::{
     Json, Router,
@@ -36,7 +47,43 @@ pub struct AppState {
     pool: PgPool,
     chunks: ChunkStore,
     base_url: Url,
-    dev_token_hash: [u8; 32],
+    authentication: Authentication,
+    metrics: Arc<ServiceMetrics>,
+}
+
+#[derive(Default)]
+struct ServiceMetrics {
+    logical_uploaded: AtomicU64,
+    logical_downloaded: AtomicU64,
+    chunks_received: AtomicU64,
+}
+
+#[derive(Clone)]
+enum Authentication {
+    DevelopmentToken {
+        hash: [u8; 32],
+    },
+    Forgejo {
+        base_url: Url,
+        client: reqwest::Client,
+    },
+    Oidc {
+        issuer: String,
+        audience: String,
+        keys: HashMap<String, jsonwebtoken::jwk::Jwk>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum Access {
+    Read,
+    Write,
+}
+
+struct Identity {
+    authorization: String,
+    subject: String,
+    administrator: bool,
 }
 
 impl AppState {
@@ -50,9 +97,112 @@ impl AppState {
             pool,
             chunks,
             base_url,
-            dev_token_hash: Sha256::digest(dev_token.as_bytes()).into(),
+            authentication: Authentication::DevelopmentToken {
+                hash: Sha256::digest(dev_token.as_bytes()).into(),
+            },
+            metrics: Arc::default(),
         }
     }
+
+    /// Creates service state that delegates identity and repository access to Forgejo.
+    ///
+    /// Tokens are checked with Forgejo on every request so revocation takes
+    /// effect immediately and administrator credentials never reach clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a hardened HTTP client cannot be constructed.
+    pub fn new_forgejo(
+        pool: PgPool,
+        chunks: ChunkStore,
+        base_url: Url,
+        forgejo_url: Url,
+    ) -> Result<Self, reqwest::Error> {
+        Ok(Self {
+            pool,
+            chunks,
+            base_url,
+            authentication: Authentication::Forgejo {
+                base_url: forgejo_url,
+                client: reqwest::Client::builder().build()?,
+            },
+            metrics: Arc::default(),
+        })
+    }
+
+    /// Creates service state using OIDC signature validation and database grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OidcSetupError`] if discovery or the initial JWKS load fails.
+    pub async fn new_oidc(
+        pool: PgPool,
+        chunks: ChunkStore,
+        base_url: Url,
+        issuer_url: Url,
+        audience: &str,
+    ) -> Result<Self, OidcSetupError> {
+        let client = reqwest::Client::builder().build()?;
+        let discovery_url = issuer_url.join(".well-known/openid-configuration")?;
+        let discovery: OidcDiscovery = client
+            .get(discovery_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if discovery.issuer.trim_end_matches('/') != issuer_url.as_str().trim_end_matches('/') {
+            return Err(OidcSetupError::IssuerMismatch);
+        }
+        let set: jsonwebtoken::jwk::JwkSet = client
+            .get(discovery.jwks_uri)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let keys = set
+            .keys
+            .into_iter()
+            .filter_map(|key| key.common.key_id.clone().map(|id| (id, key)))
+            .collect();
+        Ok(Self {
+            pool,
+            chunks,
+            base_url,
+            authentication: Authentication::Oidc {
+                issuer: discovery.issuer,
+                audience: audience.into(),
+                keys,
+            },
+            metrics: Arc::default(),
+        })
+    }
+}
+
+/// OIDC discovery or key-loading failure during fail-closed startup.
+#[derive(Debug, thiserror::Error)]
+pub enum OidcSetupError {
+    /// Provider HTTP or JSON operation failed.
+    #[error("OIDC provider request failed: {0}")]
+    Provider(#[from] reqwest::Error),
+    /// A configured or discovered URL was invalid.
+    #[error("OIDC URL is invalid: {0}")]
+    Url(#[from] url::ParseError),
+    /// Discovery did not describe the configured issuer.
+    #[error("OIDC discovery issuer does not match the configured issuer")]
+    IssuerMismatch,
+}
+
+#[derive(serde::Deserialize)]
+struct OidcDiscovery {
+    issuer: String,
+    jwks_uri: Url,
+}
+
+#[derive(serde::Deserialize)]
+struct OidcClaims {
+    sub: String,
 }
 
 /// Runs all embedded `PostgreSQL` schema migrations.
@@ -68,6 +218,8 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/readyz", get(readiness))
+        .route("/metrics", get(metrics))
         .route("/{owner}/{repository}/info/lfs/objects/batch", post(batch))
         .route(
             "/{owner}/{repository}/info/lfs/objects/{oid}",
@@ -105,24 +257,47 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn readiness(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn metrics(State(state): State<AppState>) -> String {
+    format!(
+        "# TYPE git_cdc_logical_upload_bytes_total counter\n\
+git_cdc_logical_upload_bytes_total {}\n\
+# TYPE git_cdc_logical_download_bytes_total counter\n\
+git_cdc_logical_download_bytes_total {}\n\
+# TYPE git_cdc_received_chunk_bytes_total counter\n\
+git_cdc_received_chunk_bytes_total {}\n",
+        state.metrics.logical_uploaded.load(Ordering::Relaxed),
+        state.metrics.logical_downloaded.load(Ordering::Relaxed),
+        state.metrics.chunks_received.load(Ordering::Relaxed),
+    )
+}
+
 async fn create_lock(
     State(state): State<AppState>,
     Path((owner, repository)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<LockRequest>,
 ) -> Result<(StatusCode, Json<LockResponse>), ApiError> {
-    authenticate(&state, &headers)?;
+    let identity = authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     validate_lock_path(&request.path)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let id = Uuid::new_v4();
     let result = sqlx::query_as::<_, (String,)>(
         "INSERT INTO lfs_locks (id, repository_id, path, owner_subject) \
-         VALUES ($1, $2, $3, 'development-user') \
+         VALUES ($1, $2, $3, $4) \
          RETURNING to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
     )
     .bind(id)
     .bind(repository_id)
     .bind(&request.path)
+    .bind(&identity.subject)
     .fetch_one(&state.pool)
     .await;
     let (locked_at,) = match result {
@@ -147,7 +322,7 @@ async fn create_lock(
                 path: request.path,
                 locked_at,
                 owner: LockOwner {
-                    name: "development-user".into(),
+                    name: identity.subject,
                 },
             },
         }),
@@ -159,8 +334,15 @@ async fn list_locks(
     Path((owner, repository)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<LockList>, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
+    Ok(Json(LockList {
+        locks: load_locks(&state, repository_id).await?,
+        next_cursor: None,
+    }))
+}
+
+async fn load_locks(state: &AppState, repository_id: Uuid) -> Result<Vec<Lock>, ApiError> {
     let rows = sqlx::query_as::<_, (Uuid, String, String, String)>(
         "SELECT id, path, owner_subject, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
@@ -170,18 +352,15 @@ async fn list_locks(
     .fetch_all(&state.pool)
     .await
     .map_err(|error| ApiError::database(&error))?;
-    Ok(Json(LockList {
-        locks: rows
-            .into_iter()
-            .map(|(id, path, subject, locked_at)| Lock {
-                id: id.to_string(),
-                path,
-                locked_at,
-                owner: LockOwner { name: subject },
-            })
-            .collect(),
-        next_cursor: None,
-    }))
+    Ok(rows
+        .into_iter()
+        .map(|(id, path, subject, locked_at)| Lock {
+            id: id.to_string(),
+            path,
+            locked_at,
+            owner: LockOwner { name: subject },
+        })
+        .collect())
 }
 
 async fn verify_locks(
@@ -189,11 +368,12 @@ async fn verify_locks(
     Path((owner, repository)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<LockVerifyResponse>, ApiError> {
-    let Json(list) = list_locks(State(state), Path((owner, repository)), headers).await?;
-    let (ours, theirs) = list
-        .locks
+    let identity = authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
+    let repository_id = repository_id(&state, &owner, &repository).await?;
+    let (ours, theirs) = load_locks(&state, repository_id)
+        .await?
         .into_iter()
-        .partition(|lock| lock.owner.name == "development-user");
+        .partition(|lock| lock.owner.name == identity.subject);
     Ok(Json(LockVerifyResponse {
         ours,
         theirs,
@@ -205,10 +385,25 @@ async fn unlock(
     State(state): State<AppState>,
     Path((owner, repository, lock_id)): Path<(String, String, Uuid)>,
     headers: HeaderMap,
-    Json(_request): Json<UnlockRequest>,
+    Json(request): Json<UnlockRequest>,
 ) -> Result<Json<UnlockResponse>, ApiError> {
-    authenticate(&state, &headers)?;
+    let identity = authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
+    let lock_owner: String = sqlx::query_scalar(
+        "SELECT owner_subject FROM lfs_locks WHERE id = $1 AND repository_id = $2",
+    )
+    .bind(lock_id)
+    .bind(repository_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| ApiError::database(&error))?
+    .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "lock not found"))?;
+    if lock_owner != identity.subject && (!request.force || !identity.administrator) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "only the lock owner or an administrator using force may unlock",
+        ));
+    }
     let row = sqlx::query_as::<_, (String, String, String)>(
         "DELETE FROM lfs_locks WHERE id = $1 AND repository_id = $2 \
          RETURNING path, owner_subject, \
@@ -252,7 +447,7 @@ async fn upload_basic(
     headers: HeaderMap,
     body: Body,
 ) -> Result<StatusCode, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let temporary = tempfile::NamedTempFile::new().map_err(ApiError::io)?;
@@ -296,6 +491,14 @@ async fn upload_basic(
         ));
     }
     publish_manifest(&state, repository_id, &manifest).await?;
+    state
+        .metrics
+        .logical_uploaded
+        .fetch_add(manifest.object_size, Ordering::Relaxed);
+    state
+        .metrics
+        .chunks_received
+        .fetch_add(manifest.object_size, Ordering::Relaxed);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -304,7 +507,7 @@ async fn download_basic(
     Path((owner, repository, oid)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let manifest = load_manifest(&state, repository_id, oid).await?;
@@ -338,6 +541,10 @@ async fn download_basic(
         let _keep_until_stream_ends = &temporary_path;
         result
     });
+    state
+        .metrics
+        .logical_downloaded
+        .fetch_add(manifest.object_size, Ordering::Relaxed);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -352,7 +559,7 @@ async fn begin_cdc(
     headers: HeaderMap,
     Json(request): Json<BeginUploadRequest>,
 ) -> Result<Json<BeginUploadResponse>, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     if request.protocol_version != 1 {
         return Err(ApiError::new(
@@ -420,7 +627,7 @@ async fn upload_cdc_chunk(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let manifest = load_open_upload(&state, repository_id, oid, upload_id).await?;
@@ -433,11 +640,16 @@ async fn upload_cdc_chunk(
             "chunk length mismatch",
         ));
     }
+    let received = bytes.len() as u64;
     state
         .chunks
         .put_verified(repository_id, descriptor.id, bytes)
         .await
         .map_err(ApiError::storage)?;
+    state
+        .metrics
+        .chunks_received
+        .fetch_add(received, Ordering::Relaxed);
     sqlx::query(
         "INSERT INTO chunks (repository_id, chunk_id, size) VALUES ($1, $2, $3) \
          ON CONFLICT (repository_id, chunk_id) DO NOTHING",
@@ -456,7 +668,7 @@ async fn finalize_cdc(
     Path((owner, repository, oid, upload_id)): Path<(String, String, String, Uuid)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let manifest = load_open_upload(&state, repository_id, oid, upload_id).await?;
@@ -487,6 +699,10 @@ async fn finalize_cdc(
         ));
     }
     publish_manifest(&state, repository_id, &manifest).await?;
+    state
+        .metrics
+        .logical_uploaded
+        .fetch_add(manifest.object_size, Ordering::Relaxed);
     sqlx::query("UPDATE upload_sessions SET state = 'finalized' WHERE id = $1 AND state = 'open'")
         .bind(upload_id)
         .execute(&state.pool)
@@ -500,7 +716,7 @@ async fn download_cdc_manifest(
     Path((owner, repository, oid)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<ObjectManifest>, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     Ok(Json(load_manifest(&state, repository_id, oid).await?))
@@ -511,7 +727,7 @@ async fn download_cdc_chunk(
     Path((owner, repository, oid, index)): Path<(String, String, String, usize)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authenticate(&state, &headers)?;
+    authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
     let manifest = load_manifest(&state, repository_id, oid).await?;
@@ -537,7 +753,11 @@ async fn batch(
     headers: HeaderMap,
     Json(request): Json<BatchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let authorization = authenticate(&state, &headers)?;
+    let access = match request.operation {
+        Operation::Upload => Access::Write,
+        Operation::Download => Access::Read,
+    };
+    let identity = authenticate(&state, &headers, &owner, &repository, access).await?;
     let repository_id =
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM repositories WHERE owner = $1 AND name = $2")
             .bind(&owner)
@@ -568,7 +788,7 @@ async fn batch(
                     action_url(&state.base_url, &owner, &repository, object.oid, transfer)?;
                 action
                     .header
-                    .insert("Authorization".into(), authorization.clone());
+                    .insert("Authorization".into(), identity.authorization.clone());
                 actions.insert("upload".into(), action);
             }
             (Operation::Download, true) => {
@@ -576,7 +796,7 @@ async fn batch(
                     action_url(&state.base_url, &owner, &repository, object.oid, transfer)?;
                 action
                     .header
-                    .insert("Authorization".into(), authorization.clone());
+                    .insert("Authorization".into(), identity.authorization.clone());
                 actions.insert("download".into(), action);
             }
             (Operation::Download, false) => {
@@ -604,20 +824,200 @@ async fn batch(
     ))
 }
 
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    owner: &str,
+    repository: &str,
+    access: Access,
+) -> Result<Identity, ApiError> {
     let value = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(ApiError::unauthorized)?;
-    let token = value
+    match &state.authentication {
+        Authentication::DevelopmentToken { hash } => {
+            let token = value
+                .strip_prefix("Bearer ")
+                .ok_or_else(ApiError::unauthorized)?;
+            let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            if bool::from(candidate.ct_eq(hash)) {
+                Ok(Identity {
+                    authorization: value.to_owned(),
+                    subject: "development-user".into(),
+                    administrator: true,
+                })
+            } else {
+                Err(ApiError::unauthorized())
+            }
+        }
+        Authentication::Forgejo { base_url, client } => {
+            authenticate_forgejo(base_url, client, value, owner, repository, access).await
+        }
+        Authentication::Oidc {
+            issuer,
+            audience,
+            keys,
+        } => {
+            authenticate_oidc(
+                state,
+                OidcTrust {
+                    issuer,
+                    audience,
+                    keys,
+                },
+                value,
+                owner,
+                repository,
+                access,
+            )
+            .await
+        }
+    }
+}
+
+async fn authenticate_forgejo(
+    base_url: &Url,
+    client: &reqwest::Client,
+    authorization: &str,
+    owner: &str,
+    repository_name: &str,
+    access: Access,
+) -> Result<Identity, ApiError> {
+    let user_url = base_url
+        .join("api/v1/user")
+        .map_err(|error| ApiError::authentication(error.to_string()))?;
+    let mut repo_url = base_url.clone();
+    repo_url
+        .path_segments_mut()
+        .map_err(|()| ApiError::authentication("invalid Forgejo URL"))?
+        .extend(["api", "v1", "repos", owner, repository_name]);
+    let user_response = client
+        .get(user_url)
+        .header(header::AUTHORIZATION, authorization)
+        .send()
+        .await
+        .map_err(|error| ApiError::authentication(error.to_string()))?;
+    if !user_response.status().is_success() {
+        return Err(ApiError::unauthorized());
+    }
+    let user: ForgejoUser = user_response
+        .json()
+        .await
+        .map_err(|error| ApiError::authentication(error.to_string()))?;
+    let repo_response = client
+        .get(repo_url)
+        .header(header::AUTHORIZATION, authorization)
+        .send()
+        .await
+        .map_err(|error| ApiError::authentication(error.to_string()))?;
+    if repo_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(ApiError::unauthorized());
+    }
+    if repo_response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "repository not found"));
+    }
+    let repository: ForgejoRepository = repo_response
+        .error_for_status()
+        .map_err(|error| ApiError::authentication(error.to_string()))?
+        .json()
+        .await
+        .map_err(|error| ApiError::authentication(error.to_string()))?;
+    let allowed = match access {
+        Access::Read => {
+            repository.permissions.pull
+                || repository.permissions.push
+                || repository.permissions.admin
+        }
+        Access::Write => repository.permissions.push || repository.permissions.admin,
+    };
+    if !allowed {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "repository access denied",
+        ));
+    }
+    Ok(Identity {
+        authorization: authorization.to_owned(),
+        subject: user.login,
+        administrator: repository.permissions.admin,
+    })
+}
+
+struct OidcTrust<'a> {
+    issuer: &'a str,
+    audience: &'a str,
+    keys: &'a HashMap<String, jsonwebtoken::jwk::Jwk>,
+}
+
+async fn authenticate_oidc(
+    state: &AppState,
+    trust: OidcTrust<'_>,
+    authorization: &str,
+    owner: &str,
+    repository: &str,
+    access: Access,
+) -> Result<Identity, ApiError> {
+    let token = authorization
         .strip_prefix("Bearer ")
         .ok_or_else(ApiError::unauthorized)?;
-    let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    if bool::from(candidate.ct_eq(&state.dev_token_hash)) {
-        Ok(value.to_owned())
-    } else {
-        Err(ApiError::unauthorized())
+    let token_header = jsonwebtoken::decode_header(token).map_err(|_| ApiError::unauthorized())?;
+    let key_id = token_header.kid.ok_or_else(ApiError::unauthorized)?;
+    let jwk = trust.keys.get(&key_id).ok_or_else(ApiError::unauthorized)?;
+    let key = jsonwebtoken::DecodingKey::from_jwk(jwk).map_err(|_| ApiError::unauthorized())?;
+    let mut validation = jsonwebtoken::Validation::new(token_header.alg);
+    validation.set_issuer(&[trust.issuer]);
+    validation.set_audience(&[trust.audience]);
+    let claims = jsonwebtoken::decode::<OidcClaims>(token, &key, &validation)
+        .map_err(|_| ApiError::unauthorized())?
+        .claims;
+    let grant = sqlx::query_as::<_, (bool, bool, bool)>(
+        "SELECT g.can_read, g.can_write, g.can_admin \
+                 FROM repository_grants g JOIN repositories r ON r.id = g.repository_id \
+                 WHERE r.owner = $1 AND r.name = $2 AND g.subject = $3",
+    )
+    .bind(owner)
+    .bind(repository)
+    .bind(&claims.sub)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| ApiError::database(&error))?
+    .ok_or_else(|| ApiError::new(StatusCode::FORBIDDEN, "repository access denied"))?;
+    let allowed = match access {
+        Access::Read => grant.0,
+        Access::Write => grant.1,
+    };
+    if !allowed {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "repository access denied",
+        ));
     }
+    Ok(Identity {
+        authorization: authorization.to_owned(),
+        subject: claims.sub,
+        administrator: grant.2,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ForgejoUser {
+    login: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ForgejoRepository {
+    permissions: ForgejoPermissions,
+}
+
+#[derive(serde::Deserialize)]
+struct ForgejoPermissions {
+    #[serde(default)]
+    pull: bool,
+    #[serde(default)]
+    push: bool,
+    #[serde(default)]
+    admin: bool,
 }
 
 fn action_url(
@@ -791,6 +1191,15 @@ impl ApiError {
 
     fn unauthorized() -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "authentication required")
+    }
+
+    fn authentication(message: impl Into<String>) -> Self {
+        let message = message.into();
+        tracing::error!(message, "authentication provider request failed");
+        Self::new(
+            StatusCode::BAD_GATEWAY,
+            "authentication provider unavailable",
+        )
     }
 
     fn database(error: &sqlx::Error) -> Self {

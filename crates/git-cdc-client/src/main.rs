@@ -28,6 +28,23 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = Scope::Local)]
         scope: Scope,
     },
+    /// Removes this executable's custom-transfer configuration.
+    Uninstall {
+        /// Git configuration scope to modify.
+        #[arg(long, value_enum, default_value_t = Scope::Local)]
+        scope: Scope,
+    },
+    /// Configures the repository's LFS endpoint.
+    Configure {
+        /// Full repository LFS base URL ending in `/info/lfs`.
+        #[arg(long)]
+        url: String,
+        /// Git configuration scope to modify.
+        #[arg(long, value_enum, default_value_t = Scope::Local)]
+        scope: Scope,
+    },
+    /// Shows the effective transfer-agent and LFS endpoint configuration.
+    Status,
     /// Verifies Git, Git LFS, configuration, and cache access.
     Doctor,
     /// Manages the verified local chunk cache.
@@ -73,6 +90,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             run_transfer_protocol(io::stdin().lock(), io::stdout().lock(), &backend)?;
         }
         Commands::Install { scope } => install(scope)?,
+        Commands::Uninstall { scope } => uninstall(scope)?,
+        Commands::Configure { url, scope } => configure(scope, &url)?,
+        Commands::Status => status()?,
         Commands::Doctor => doctor()?,
         Commands::Cache { command } => match command {
             CacheCommands::Stats => {
@@ -103,7 +123,63 @@ fn install(scope: Scope) -> Result<(), Box<dyn std::error::Error>> {
         &executable.to_string_lossy(),
     )?;
     git_config(flag, "lfs.customtransfer.cdc.args", "transfer")?;
+    git_config(flag, "lfs.customtransfer.cdc.concurrent", "true")?;
     println!("configured Git-CDC custom transfer agent ({flag})");
+    Ok(())
+}
+
+fn uninstall(scope: Scope) -> Result<(), Box<dyn std::error::Error>> {
+    let flag = match scope {
+        Scope::Local => "--local",
+        Scope::Global => "--global",
+    };
+    for key in [
+        "lfs.customtransfer.cdc.path",
+        "lfs.customtransfer.cdc.args",
+        "lfs.customtransfer.cdc.concurrent",
+    ] {
+        let status = Command::new("git")
+            .args(["config", flag, "--unset-all", key])
+            .status()?;
+        if !status.success() && status.code() != Some(5) {
+            return Err(format!("git config could not remove {key}").into());
+        }
+    }
+    println!("removed Git-CDC custom transfer agent ({flag})");
+    Ok(())
+}
+
+fn configure(scope: Scope, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = url::Url::parse(url)?;
+    if !matches!(parsed.scheme(), "http" | "https") || !parsed.path().ends_with("/info/lfs") {
+        return Err("LFS URL must be HTTP(S) and end in /info/lfs".into());
+    }
+    let flag = match scope {
+        Scope::Local => "--local",
+        Scope::Global => "--global",
+    };
+    git_config(flag, "lfs.url", url)?;
+    println!("configured LFS endpoint ({flag}): {url}");
+    Ok(())
+}
+
+fn status() -> Result<(), Box<dyn std::error::Error>> {
+    for key in [
+        "lfs.url",
+        "lfs.customtransfer.cdc.path",
+        "lfs.customtransfer.cdc.args",
+        "lfs.customtransfer.cdc.concurrent",
+    ] {
+        let output = Command::new("git")
+            .args(["config", "--get", key])
+            .output()?;
+        let value = if output.status.success() {
+            String::from_utf8(output.stdout)?.trim().to_owned()
+        } else {
+            "<unset>".into()
+        };
+        println!("{key}={value}");
+    }
     Ok(())
 }
 

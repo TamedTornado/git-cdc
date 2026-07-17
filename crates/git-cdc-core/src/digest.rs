@@ -12,7 +12,9 @@ macro_rules! digest_type {
         pub struct $name([u8; DIGEST_BYTES]);
 
         impl $name {
-            pub(crate) const fn from_bytes(bytes: [u8; DIGEST_BYTES]) -> Self {
+            /// Constructs an identity from an already calculated 256-bit digest.
+            #[must_use]
+            pub const fn from_bytes(bytes: [u8; DIGEST_BYTES]) -> Self {
                 Self(bytes)
             }
 

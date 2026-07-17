@@ -25,6 +25,7 @@ directories = "6.0.0"
 fastcdc = "4.0.1"
 futures-util = "0.3"
 hex = "0.4.3"
+jsonwebtoken = { version = "9.3.1", default-features = false }
 object_store = { version = "0.14.1", features = ["aws", "azure", "gcp"] }
 proptest = "1.9.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }

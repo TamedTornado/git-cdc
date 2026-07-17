@@ -22,11 +22,15 @@ usable beta. The design and complete beta acceptance criteria are recorded in
 
 - Deterministic streaming FastCDC manifests with SHA-256/BLAKE3 integrity.
 - A native `git-lfs` custom-transfer client with resumable uploads, verified
-  chunk caching, install/doctor/cache commands, and no shell dependency.
+  chunk caching, install/configure/status/uninstall/doctor/cache commands, and
+  no shell dependency.
 - Standard Git LFS Batch/basic upload/download and locking APIs.
 - A chunk-aware CDC upload/download protocol with idempotent sessions.
 - PostgreSQL metadata and provider-neutral filesystem, S3/MinIO, Azure, and GCS
   object storage through Apache Arrow's `object_store` crate.
+- Forgejo per-request authorization, generic OIDC/JWKS validation and
+  repository grants, read-only Git reachability reconciliation, and
+  conservative grace-period garbage collection.
 - Real PostgreSQL, filesystem, MinIO, HTTP client/server, and stock `git-lfs`
   contract coverage. Native CI builds and tests on Linux, macOS, and Windows.
 
@@ -73,9 +77,8 @@ request. For local testing only:
 git config http.extraheader "Authorization: Bearer $GIT_CDC_DEV_TOKEN"
 ```
 
-Production Forgejo and OIDC authentication, reachability reconciliation, and
-safe garbage collection remain beta work and are intentionally not replaced
-with permissive fallbacks.
+Deployment, provisioning, authentication, reconciliation, garbage collection,
+backup, and recovery are documented in [Operations](docs/OPERATIONS.md).
 
 ## License
 

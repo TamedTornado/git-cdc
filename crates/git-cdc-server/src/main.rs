@@ -20,7 +20,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_url = required("GIT_CDC_DATABASE_URL")?;
     let base_url = Url::parse(&required("GIT_CDC_BASE_URL")?)?;
-    let dev_token = required("GIT_CDC_DEV_TOKEN")?;
     let storage_url = Url::parse(&required("GIT_CDC_STORAGE_URL")?)?;
     let bind: SocketAddr = std::env::var("GIT_CDC_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())
@@ -33,7 +32,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     migrate(&pool).await?;
     let (store, prefix) = object_store::parse_url_opts(&storage_url, std::env::vars())?;
     let store = PrefixStore::new(store, prefix);
-    let state = AppState::new(pool, ChunkStore::new(Arc::new(store)), base_url, &dev_token);
+    let chunks = ChunkStore::new(Arc::new(store));
+    let auth_mode = match std::env::var("GIT_CDC_AUTH_MODE") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => "development".into(),
+        Err(error) => return Err(error.into()),
+    };
+    let state = match auth_mode.as_str() {
+        "forgejo" => AppState::new_forgejo(
+            pool,
+            chunks,
+            base_url,
+            Url::parse(&required("GIT_CDC_FORGEJO_URL")?)?,
+        )?,
+        "oidc" => {
+            AppState::new_oidc(
+                pool,
+                chunks,
+                base_url,
+                Url::parse(&required("GIT_CDC_OIDC_ISSUER")?)?,
+                &required("GIT_CDC_OIDC_AUDIENCE")?,
+            )
+            .await?
+        }
+        "development" => AppState::new(pool, chunks, base_url, &required("GIT_CDC_DEV_TOKEN")?),
+        other => return Err(format!("unsupported GIT_CDC_AUTH_MODE: {other}").into()),
+    };
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(address = %bind, "Git-CDC server listening");
     axum::serve(listener, build_router(state))
