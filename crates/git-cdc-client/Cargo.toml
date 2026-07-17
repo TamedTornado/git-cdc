@@ -1,0 +1,29 @@
+[package]
+name = "git-cdc"
+description = "Cross-platform content-defined chunk transfer agent for Git LFS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+directories.workspace = true
+git-cdc-core = { path = "../git-cdc-core" }
+git-cdc-protocol = { path = "../git-cdc-protocol" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

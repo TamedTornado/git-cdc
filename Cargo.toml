@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/git-cdc-core"]
+members = [
+    "crates/git-cdc-client",
+    "crates/git-cdc-core",
+    "crates/git-cdc-protocol",
+    "crates/git-cdc-server",
+    "crates/git-cdc-storage",
+]
 
 [workspace.package]
 version = "0.1.0-alpha.1"
@@ -12,13 +18,32 @@ authors = ["Jason Maskell <7510041+TamedTornado@users.noreply.github.com>"]
 
 [workspace.dependencies]
 blake3 = "1.8.5"
+axum = "0.8.9"
+bytes = "1.11"
+clap = { version = "4.6.2", features = ["derive"] }
+directories = "6.0.0"
 fastcdc = "4.0.1"
+futures-util = "0.3"
 hex = "0.4.3"
+object_store = { version = "0.14.1", features = ["aws", "azure", "gcp"] }
 proptest = "1.9.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
+serial_test = "3.2"
 sha2 = "0.11.0"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "json", "migrate", "macros"] }
+subtle = "2.6"
+tempfile = "3.27.0"
 thiserror = "2.0.18"
+tokio = { version = "1.53.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.18", features = ["serde", "v4"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

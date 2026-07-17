@@ -114,3 +114,38 @@ fn beta_v1_has_a_cross_platform_golden_manifest() {
         "{\"version\":\"v1\",\"profile\":\"fastcdc-v1\",\"object_oid\":\"36e0d422a31ba1fc4f852eaca7b55e43ac0804155a0237baacb5718294c8f83c\",\"object_size\":12582949,\"chunks\":[{\"id\":\"0dae2c7cdfa40f65daa6a36e8413c722c259db2dd01ba0dc411fff7486f5f9ba\",\"offset\":0,\"length\":2112183},{\"id\":\"cc9a1609d366cf126f13701ce19cb8820cc8d688837ee1ea9b4dfbcc724e711d\",\"offset\":2112183,\"length\":2120448},{\"id\":\"cc9a1609d366cf126f13701ce19cb8820cc8d688837ee1ea9b4dfbcc724e711d\",\"offset\":4232631,\"length\":2120448},{\"id\":\"cc9a1609d366cf126f13701ce19cb8820cc8d688837ee1ea9b4dfbcc724e711d\",\"offset\":6353079,\"length\":2120448},{\"id\":\"cc9a1609d366cf126f13701ce19cb8820cc8d688837ee1ea9b4dfbcc724e711d\",\"offset\":8473527,\"length\":2120448},{\"id\":\"c271f0ba6fc132ac2f8be326aa36082b35d199eea05890eed2796688e4498589\",\"offset\":10593975,\"length\":1988974}]}"
     );
 }
+
+#[test]
+fn rejects_non_contiguous_manifest_offsets() {
+    let mut manifest = ChunkStream::new(
+        Cursor::new(patterned_bytes(2 * 1024 * 1024)),
+        ChunkingProfile::beta_v1(),
+    )
+    .collect_manifest()
+    .unwrap();
+    manifest.chunks[0].offset = 1;
+
+    assert!(manifest.validate().is_err());
+}
+
+#[test]
+fn rejects_manifest_size_that_disagrees_with_chunks() {
+    let mut manifest = ChunkStream::new(
+        Cursor::new(patterned_bytes(2 * 1024 * 1024)),
+        ChunkingProfile::beta_v1(),
+    )
+    .collect_manifest()
+    .unwrap();
+    manifest.object_size += 1;
+
+    assert!(manifest.validate().is_err());
+}
+
+#[test]
+fn accepts_the_canonical_empty_object_manifest() {
+    let manifest = ChunkStream::new(Cursor::new(Vec::<u8>::new()), ChunkingProfile::beta_v1())
+        .collect_manifest()
+        .unwrap();
+
+    assert_eq!(manifest.validate(), Ok(()));
+}

@@ -1,0 +1,24 @@
+[package]
+name = "git-cdc-storage"
+description = "Provider-neutral immutable chunk storage for Git-CDC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+blake3.workspace = true
+bytes.workspace = true
+git-cdc-core = { path = "../git-cdc-core" }
+object_store.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

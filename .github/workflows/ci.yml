@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify native tools
+        run: |
+          git --version
+          git lfs version
+      - name: Build all binaries
+        run: cargo build --workspace --all-targets --locked
+      - name: Cross-platform contracts
+        run: cargo test --locked -p git-cdc-core -p git-cdc-protocol -p git-cdc-storage -p git-cdc
+
+  integration:
+    name: PostgreSQL, MinIO, and HTTP integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Start real dependencies
+        run: |
+          docker compose -f docker-compose.test.yml up -d --wait postgres
+          docker compose -f docker-compose.test.yml up -d minio
+          docker compose -f docker-compose.test.yml run --rm minio-init
+      - name: Run complete workspace suite
+        env:
+          GIT_CDC_TEST_DATABASE_URL: postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc
+          GIT_CDC_TEST_MINIO: "1"
+        run: cargo test --workspace --locked
+      - name: Dependency logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs
+
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - run: cargo audit
+      - run: cargo deny check
