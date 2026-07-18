@@ -1,6 +1,6 @@
-# Git-CDC Protocol v1
+# Git LFS Delta Protocol v1
 
-Git-CDC extends the Git LFS Batch API without changing Git history. Pointer
+Git LFS Delta extends the Git LFS Batch API without changing Git history. Pointer
 files remain the standard three-line Git LFS v1 format; the pointer SHA-256 and
 size are the canonical logical-object identity.
 

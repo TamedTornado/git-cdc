@@ -838,7 +838,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-cdc"
+name = "git-lfs-delta"
 version = "0.1.0-beta.2"
 dependencies = [
  "axum",
@@ -847,8 +847,8 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "directories",
- "git-cdc-core",
- "git-cdc-protocol",
+ "git-lfs-delta-core",
+ "git-lfs-delta-protocol",
  "reqwest",
  "serde",
  "serde_json",
@@ -861,7 +861,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-cdc-core"
+name = "git-lfs-delta-core"
 version = "0.1.0-beta.2"
 dependencies = [
  "blake3",
@@ -875,10 +875,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-cdc-protocol"
+name = "git-lfs-delta-protocol"
 version = "0.1.0-beta.2"
 dependencies = [
- "git-cdc-core",
+ "git-lfs-delta-core",
  "serde",
  "serde_json",
  "thiserror",
@@ -887,17 +887,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-cdc-server"
+name = "git-lfs-delta-server"
 version = "0.1.0-beta.2"
 dependencies = [
  "axum",
  "bytes",
  "clap",
  "futures-util",
- "git-cdc",
- "git-cdc-core",
- "git-cdc-protocol",
- "git-cdc-storage",
+ "git-lfs-delta",
+ "git-lfs-delta-core",
+ "git-lfs-delta-protocol",
+ "git-lfs-delta-storage",
  "hex",
  "http-body-util",
  "jsonwebtoken",
@@ -922,12 +922,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-cdc-storage"
+name = "git-lfs-delta-storage"
 version = "0.1.0-beta.2"
 dependencies = [
  "blake3",
  "bytes",
- "git-cdc-core",
+ "git-lfs-delta-core",
  "object_store",
  "tempfile",
  "thiserror",

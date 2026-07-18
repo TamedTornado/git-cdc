@@ -1,0 +1,35 @@
+[package]
+name = "git-lfs-delta"
+description = "Cross-platform content-defined chunk transfer agent for Git LFS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+directories.workspace = true
+git-lfs-delta-core = { path = "../git-lfs-delta-core", version = "0.1.0-beta.2" }
+git-lfs-delta-protocol = { path = "../git-lfs-delta-protocol", version = "0.1.0-beta.2" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+bytes.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

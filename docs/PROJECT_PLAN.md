@@ -1,10 +1,10 @@
-# Git-CDC: Usable Beta Project Plan
+# Git LFS Delta: Usable Beta Project Plan
 
 ## Objective
 
 Build a public Rust implementation of chunk-deduplicated Git LFS. Standard
 Git LFS pointers and clients remain compatible; installing the native
-`git-cdc` transfer agent enables incremental chunk uploads and downloads.
+`git-lfs-delta` transfer agent enables incremental chunk uploads and downloads.
 
 Forgejo is the first reference integration, not a core dependency. The client
 runs natively on Windows, macOS, and Linux. The Linux-first server uses
@@ -25,13 +25,13 @@ PostgreSQL and pluggable object storage.
 
 The workspace contains:
 
-- `git-cdc`: native Git LFS custom-transfer agent and user CLI.
-- `git-cdc-server`: LFS API, CDC transfer API, locks, authentication, and
+- `git-lfs-delta`: native Git LFS custom-transfer agent and user CLI.
+- `git-lfs-delta-server`: LFS API, CDC transfer API, locks, authentication, and
   administration.
 - Shared crates for protocol types, chunking/manifests, storage, and test
   support where a real compile boundary exists.
 
-Git-CDC retains the standard Git LFS pointer format. Whole-object SHA-256 and
+Git LFS Delta retains the standard Git LFS pointer format. Whole-object SHA-256 and
 byte size remain canonical. The server supports both standard Git LFS
 Batch/basic transfers and a negotiated `cdc` custom transfer.
 
@@ -47,16 +47,16 @@ outside the caller's authorized repository.
 
 ## Client
 
-Git-CDC initially extends rather than replaces Git LFS. It implements the Git
+Git LFS Delta initially extends rather than replaces Git LFS. It implements the Git
 LFS custom-transfer protocol over stdin/stdout and provides these commands:
 
-- `git-cdc install`
-- `git-cdc uninstall`
-- `git-cdc configure`
-- `git-cdc doctor`
-- `git-cdc status`
-- `git-cdc cache prune`
-- internal `git-cdc transfer`
+- `git-lfs-delta install`
+- `git-lfs-delta uninstall`
+- `git-lfs-delta configure`
+- `git-lfs-delta doctor`
+- `git-lfs-delta status`
+- `git-lfs-delta cache prune`
+- internal `git-lfs-delta transfer`
 
 The client resolves credentials using Git credential helpers, stores cache and
 resumable state in native platform directories, bounds memory independently of
@@ -90,9 +90,9 @@ specific repository and operation; administrator credentials are never handed
 to clients. OIDC token acquisition remains external in beta and credentials
 flow through Git's credential machinery.
 
-A reverse proxy can route a forge's normal LFS URL to Git-CDC. Other forges and
+A reverse proxy can route a forge's normal LFS URL to Git LFS Delta. Other forges and
 bare Git servers can configure a separate LFS endpoint. Pull requests, issues,
-reviews, and forge UI concepts remain outside Git-CDC core.
+reviews, and forge UI concepts remain outside Git LFS Delta core.
 
 The service implements standard Git LFS locks, including repository-scoped
 paths, ownership, conflict reporting, pagination, and authorized forced
@@ -119,7 +119,7 @@ quarantined before reclamation.
 ## Safe garbage collection
 
 Git LFS object traffic does not prove whether Git history still references an
-object. Git-CDC therefore never deletes a completed logical object based on
+object. Git LFS Delta therefore never deletes a completed logical object based on
 last access or age alone.
 
 A forge-neutral reconciler fetches repository refs through ordinary read-only
@@ -165,8 +165,8 @@ deduplication ratio.
 ## Beta acceptance
 
 - Native end-to-end CI passes on Windows, macOS, and Linux.
-- Stock Git LFS and Git-CDC clients safely share a Forgejo repository.
-- Standard pointers remain usable after Git-CDC is uninstalled.
+- Stock Git LFS and Git LFS Delta clients safely share a Forgejo repository.
+- Standard pointers remain usable after Git LFS Delta is uninstalled.
 - Filesystem and S3/MinIO storage pass the same behavioral suite.
 - Interrupted transfers resume without corruption or duplicate logical state.
 - Locks conform to the Git LFS API.

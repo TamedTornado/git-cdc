@@ -39,30 +39,30 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          cp target/${{ matrix.target }}/release/git-cdc release/
-          cp target/${{ matrix.target }}/release/git-cdc-server release/
-          cp target/${{ matrix.target }}/release/git-cdc-admin release/
-          tar -C release -czf git-cdc-${{ github.ref_name }}-${{ matrix.target }}.tar.gz .
-          shasum -a 256 git-cdc-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > git-cdc-${{ github.ref_name }}-${{ matrix.target }}.sha256
+          cp target/${{ matrix.target }}/release/git-lfs-delta release/
+          cp target/${{ matrix.target }}/release/git-lfs-delta-server release/
+          cp target/${{ matrix.target }}/release/git-lfs-delta-admin release/
+          tar -C release -czf git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.tar.gz .
+          shasum -a 256 git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.sha256
       - name: Package Windows binaries
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release
-          Copy-Item target/${{ matrix.target }}/release/git-cdc.exe release/
-          Copy-Item target/${{ matrix.target }}/release/git-cdc-server.exe release/
-          Copy-Item target/${{ matrix.target }}/release/git-cdc-admin.exe release/
-          Compress-Archive release/* git-cdc-${{ github.ref_name }}-${{ matrix.target }}.zip
-          (Get-FileHash git-cdc-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower() + "  git-cdc-${{ github.ref_name }}-${{ matrix.target }}.zip" | Out-File git-cdc-${{ github.ref_name }}-${{ matrix.target }}.sha256
+          Copy-Item target/${{ matrix.target }}/release/git-lfs-delta.exe release/
+          Copy-Item target/${{ matrix.target }}/release/git-lfs-delta-server.exe release/
+          Copy-Item target/${{ matrix.target }}/release/git-lfs-delta-admin.exe release/
+          Compress-Archive release/* git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.zip
+          (Get-FileHash git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower() + "  git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.zip" | Out-File git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.sha256
       - uses: anchore/sbom-action@v0
         with:
           path: target/${{ matrix.target }}/release
           format: spdx-json
-          output-file: git-cdc-${{ github.ref_name }}-${{ matrix.target }}.spdx.json
+          output-file: git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.spdx.json
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            git-cdc-${{ github.ref_name }}-${{ matrix.target }}.*
+            git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.*
 
   image:
     runs-on: ubuntu-latest

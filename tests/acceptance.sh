@@ -28,11 +28,11 @@ done
 "${compose[@]}" up -d minio
 "${compose[@]}" run --rm minio-init
 
-cargo build --locked -p git-cdc -p git-cdc-server --bins
-GIT_CDC_TEST_DATABASE_URL=postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc \
-GIT_CDC_TEST_MINIO=1 cargo test --workspace --locked --features git-cdc-server/integration-tests
+cargo build --locked -p git-lfs-delta -p git-lfs-delta-server --bins
+GIT_LFS_DELTA_TEST_DATABASE_URL=postgres://git_lfs_delta:git_lfs_delta@127.0.0.1:55433/git_lfs_delta \
+GIT_LFS_DELTA_TEST_MINIO=1 cargo test --workspace --locked --features git-lfs-delta-server/integration-tests
 
 bash "$root/tests/forgejo_e2e.sh"
 bash "$root/tests/backup_restore_e2e.sh"
 
-echo "Git-CDC beta acceptance passed"
+echo "Git LFS Delta beta acceptance passed"

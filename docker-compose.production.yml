@@ -1,26 +1,28 @@
+name: git-lfs-delta
+
 services:
-  git-cdc:
-    image: ${GIT_CDC_IMAGE:-ghcr.io/tamedtornado/git-cdc:0.1.0-beta.2}
+  git-lfs-delta:
+    image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:0.1.0-beta.2}
     restart: unless-stopped
     read_only: true
     environment:
-      GIT_CDC_DATABASE_URL: ${GIT_CDC_DATABASE_URL:?set PostgreSQL URL}
-      GIT_CDC_STORAGE_URL: ${GIT_CDC_STORAGE_URL:?set S3-compatible storage URL}
-      GIT_CDC_BASE_URL: ${GIT_CDC_BASE_URL:?set externally reachable LFS URL}
-      GIT_CDC_AUTH_MODE: forgejo
-      GIT_CDC_FORGEJO_URL: ${GIT_CDC_FORGEJO_URL:?set Forgejo root URL}
-      GIT_CDC_DATABASE_MAX_CONNECTIONS: ${GIT_CDC_DATABASE_MAX_CONNECTIONS:-20}
-      GIT_CDC_MAX_BASIC_TRANSFERS: ${GIT_CDC_MAX_BASIC_TRANSFERS:-2}
-      GIT_CDC_MAX_DATA_REQUESTS: ${GIT_CDC_MAX_DATA_REQUESTS:-64}
+      GIT_LFS_DELTA_DATABASE_URL: ${GIT_LFS_DELTA_DATABASE_URL:?set PostgreSQL URL}
+      GIT_LFS_DELTA_STORAGE_URL: ${GIT_LFS_DELTA_STORAGE_URL:?set S3-compatible storage URL}
+      GIT_LFS_DELTA_BASE_URL: ${GIT_LFS_DELTA_BASE_URL:?set externally reachable LFS URL}
+      GIT_LFS_DELTA_AUTH_MODE: forgejo
+      GIT_LFS_DELTA_FORGEJO_URL: ${GIT_LFS_DELTA_FORGEJO_URL:?set Forgejo root URL}
+      GIT_LFS_DELTA_DATABASE_MAX_CONNECTIONS: ${GIT_LFS_DELTA_DATABASE_MAX_CONNECTIONS:-20}
+      GIT_LFS_DELTA_MAX_BASIC_TRANSFERS: ${GIT_LFS_DELTA_MAX_BASIC_TRANSFERS:-2}
+      GIT_LFS_DELTA_MAX_DATA_REQUESTS: ${GIT_LFS_DELTA_MAX_DATA_REQUESTS:-64}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set object-store access key}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set object-store secret key}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_ENDPOINT: ${AWS_ENDPOINT:-}
-      RUST_LOG: ${RUST_LOG:-git_cdc_server=info,tower_http=info}
+      RUST_LOG: ${RUST_LOG:-git_lfs_delta_server=info,tower_http=info}
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - git_cdc_staging:/var/lib/git-cdc/staging
+      - git_lfs_delta_staging:/var/lib/git-lfs-delta/staging
     tmpfs:
       - /tmp:size=64m,mode=1777
     security_opt:
@@ -30,4 +32,4 @@ services:
     stop_grace_period: 30s
 
 volumes:
-  git_cdc_staging:
+  git_lfs_delta_staging:

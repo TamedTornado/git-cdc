@@ -41,7 +41,7 @@ jobs:
       - name: Build all binaries
         run: cargo build --workspace --all-targets --locked
       - name: Cross-platform contracts
-        run: cargo test --locked -p git-cdc-core -p git-cdc-protocol -p git-cdc-storage -p git-cdc
+        run: cargo test --locked -p git-lfs-delta-core -p git-lfs-delta-protocol -p git-lfs-delta-storage -p git-lfs-delta
 
   integration:
     name: PostgreSQL, MinIO, and HTTP integration

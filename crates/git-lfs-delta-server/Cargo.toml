@@ -1,0 +1,84 @@
+[package]
+name = "git-lfs-delta-server"
+description = "Forge-neutral Git LFS and CDC service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+integration-tests = []
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+git-lfs-delta-core = { path = "../git-lfs-delta-core", version = "0.1.0-beta.2" }
+git-lfs-delta-protocol = { path = "../git-lfs-delta-protocol", version = "0.1.0-beta.2" }
+git-lfs-delta-storage = { path = "../git-lfs-delta-storage", version = "0.1.0-beta.2" }
+hex.workspace = true
+jsonwebtoken.workspace = true
+object_store.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+git-lfs-delta = { path = "../git-lfs-delta-client", version = "0.1.0-beta.2" }
+http-body-util = "0.1"
+serial_test.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "admin_cli"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "batch_api"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "client_server"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "failed_push_reachability"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "forgejo_auth"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "gc_lifecycle"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "locks_api"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "oidc_auth"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "transfer_api"
+required-features = ["integration-tests"]

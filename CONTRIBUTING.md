@@ -1,6 +1,6 @@
 # Contributing
 
-Git-CDC is under active development. Before proposing a protocol or persistence
+Git LFS Delta is under active development. Before proposing a protocol or persistence
 change, open an issue describing its compatibility and recovery implications.
 
 All changes must include tests appropriate to their risk. Run formatting,

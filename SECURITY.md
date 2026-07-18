@@ -1,6 +1,6 @@
 # Security Policy
 
-Git-CDC has not yet published a stable release and should not be exposed to
+Git LFS Delta has not yet published a stable release and should not be exposed to
 untrusted networks.
 
 Please report suspected vulnerabilities privately through GitHub's security
