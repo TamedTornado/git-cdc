@@ -26,6 +26,19 @@ fn install_configure_status_and_uninstall_are_symmetric() {
             .unwrap()
     };
     assert!(run(&["install", "--scope", "local"]).status.success());
+    let configured_path = Command::new("git")
+        .current_dir(repository.path())
+        .args(["config", "--get", "lfs.customtransfer.cdc.path"])
+        .output()
+        .unwrap();
+    assert!(configured_path.status.success());
+    let configured_path = String::from_utf8(configured_path.stdout).unwrap();
+    assert!(!configured_path.trim().is_empty());
+    #[cfg(windows)]
+    assert!(
+        !configured_path.trim().starts_with(r"\\?\"),
+        "Git LFS cannot reliably launch a verbatim Windows path: {configured_path}"
+    );
     assert!(
         run(&[
             "configure",

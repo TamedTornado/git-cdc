@@ -115,7 +115,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn install(scope: Scope) -> Result<(), Box<dyn std::error::Error>> {
     require_command("git", &["--version"])?;
     require_command("git-lfs", &["version"])?;
-    let executable = fs::canonicalize(std::env::current_exe()?)?;
+    // Keep the launch path in its ordinary platform form. On Windows,
+    // `fs::canonicalize` produces a `\\?\` verbatim path which Git LFS cannot
+    // reliably launch as a custom transfer process. `doctor` canonicalizes
+    // both sides when it compares paths, so symlink equivalence is still safe.
+    let executable = std::env::current_exe()?;
     let flag = match scope {
         Scope::Local => "--local",
         Scope::Global => "--global",
