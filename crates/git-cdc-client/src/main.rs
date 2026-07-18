@@ -1,7 +1,9 @@
 //! Git-CDC command-line entrypoint.
 
 use std::{
-    fs, io,
+    error::Error,
+    fmt, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
     time::SystemTime,
@@ -75,6 +77,7 @@ enum CacheCommands {
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if is_broken_pipe(error.as_ref()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("git-cdc: {error}");
             ExitCode::FAILURE
@@ -101,7 +104,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .fold((0_u64, 0_u64), |(files, bytes), entry| {
                         (files + 1, bytes + entry.size)
                     });
-                println!("{files} chunks, {bytes} bytes");
+                write_output(format_args!("{files} chunks, {bytes} bytes"))?;
             }
             CacheCommands::Prune { max_bytes } => prune_cache(&cache_root()?, max_bytes)?,
         },
@@ -124,7 +127,9 @@ fn install(scope: Scope) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     git_config(flag, "lfs.customtransfer.cdc.args", "transfer")?;
     git_config(flag, "lfs.customtransfer.cdc.concurrent", "true")?;
-    println!("configured Git-CDC custom transfer agent ({flag})");
+    write_output(format_args!(
+        "configured Git-CDC custom transfer agent ({flag})"
+    ))?;
     Ok(())
 }
 
@@ -145,7 +150,9 @@ fn uninstall(scope: Scope) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("git config could not remove {key}").into());
         }
     }
-    println!("removed Git-CDC custom transfer agent ({flag})");
+    write_output(format_args!(
+        "removed Git-CDC custom transfer agent ({flag})"
+    ))?;
     Ok(())
 }
 
@@ -159,7 +166,7 @@ fn configure(scope: Scope, url: &str) -> Result<(), Box<dyn std::error::Error>> 
         Scope::Global => "--global",
     };
     git_config(flag, "lfs.url", url)?;
-    println!("configured LFS endpoint ({flag}): {url}");
+    write_output(format_args!("configured LFS endpoint ({flag}): {url}"))?;
     Ok(())
 }
 
@@ -178,7 +185,7 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "<unset>".into()
         };
-        println!("{key}={value}");
+        write_output(format_args!("{key}={value}"))?;
     }
     Ok(())
 }
@@ -190,9 +197,9 @@ fn doctor() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&cache)?;
     let probe = tempfile::NamedTempFile::new_in(&cache)?;
     drop(probe);
-    println!("Git: ok");
-    println!("Git LFS: ok");
-    println!("cache: {} (writable)", cache.display());
+    write_output(format_args!("Git: ok"))?;
+    write_output(format_args!("Git LFS: ok"))?;
+    write_output(format_args!("cache: {} (writable)", cache.display()))?;
     Ok(())
 }
 
@@ -267,6 +274,39 @@ fn prune_cache(root: &Path, maximum: u64) -> io::Result<()> {
         total = total.saturating_sub(entry.size);
         removed += 1;
     }
-    println!("removed {removed} chunks; cache now uses {total} bytes");
+    write_output(format_args!(
+        "removed {removed} chunks; cache now uses {total} bytes"
+    ))?;
     Ok(())
+}
+
+fn write_output(arguments: fmt::Arguments<'_>) -> io::Result<()> {
+    writeln!(io::stdout().lock(), "{arguments}")
+}
+
+fn is_broken_pipe(mut error: &(dyn Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+        {
+            return true;
+        }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_broken_pipe;
+    use std::io;
+
+    #[test]
+    fn closed_output_pipe_is_a_successful_cli_termination() {
+        let error = io::Error::from(io::ErrorKind::BrokenPipe);
+        assert!(is_broken_pipe(&error));
+    }
 }

@@ -19,6 +19,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
+stop_server() {
+  if [[ -n "$server_pid" ]]; then
+    kill "$server_pid"
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=""
+  fi
+}
+
+start_server() {
+  "$root/target/debug/git-cdc-server" >"$work/server.log" 2>&1 &
+  server_pid=$!
+  for _ in {1..30}; do
+    if curl --fail --silent http://127.0.0.1:58080/readyz >/dev/null; then
+      curl --fail --silent http://127.0.0.1:58080/healthz >/dev/null
+      return
+    fi
+    sleep 1
+  done
+  curl --fail --silent http://127.0.0.1:58080/readyz >/dev/null
+}
+
+metric() {
+  curl --fail --silent http://127.0.0.1:58080/metrics |
+    awk -v name="$1" '$1 == name { print $2 }'
+}
+
 docker compose -f "$root/docker-compose.test.yml" up -d --wait postgres forgejo
 docker compose -f "$root/docker-compose.test.yml" exec -T forgejo forgejo admin user create \
   --username alice \
@@ -45,15 +71,7 @@ export GIT_CDC_AUTH_MODE=forgejo
 export GIT_CDC_FORGEJO_URL=http://127.0.0.1:53000/
 export GIT_CDC_BIND=127.0.0.1:58080
 "$root/target/debug/git-cdc-admin" repository-add alice assets >/dev/null
-"$root/target/debug/git-cdc-server" >"$work/server.log" 2>&1 &
-server_pid=$!
-for _ in {1..30}; do
-  if curl --fail --silent http://127.0.0.1:58080/readyz >/dev/null; then
-    break
-  fi
-  sleep 1
-done
-curl --fail --silent http://127.0.0.1:58080/readyz >/dev/null
+start_server
 
 credentials="$work/credentials"
 printf 'http://alice:%s@127.0.0.1:53000\nhttp://alice:%s@127.0.0.1:58080\n' "$token" "$token" >"$credentials"
@@ -72,11 +90,32 @@ git -C "$source_repo" remote add origin http://127.0.0.1:53000/alice/assets.git
 git -C "$source_repo" lfs install --local
 (cd "$source_repo" && "$root/target/debug/git-cdc" install --scope local)
 (cd "$source_repo" && "$root/target/debug/git-cdc" configure --scope local --url http://127.0.0.1:58080/alice/assets/info/lfs)
+(cd "$source_repo" && "$root/target/debug/git-cdc" doctor)
+(cd "$source_repo" && "$root/target/debug/git-cdc" status) | grep -Fq 'lfs.customtransfer.cdc.args=transfer'
+(cd "$source_repo" && "$root/target/debug/git-cdc" status) | grep -Fq 'lfs.url=http://127.0.0.1:58080/alice/assets/info/lfs'
 git -C "$source_repo" lfs track '*.bin'
 head -c 7340123 /dev/urandom >"$source_repo/asset.bin"
 git -C "$source_repo" add .gitattributes asset.bin
 git -C "$source_repo" commit -m 'Forgejo CDC fixture'
 git -C "$source_repo" push --set-upstream origin master
+
+logical_before="$(metric git_cdc_logical_upload_bytes_total)"
+physical_before="$(metric git_cdc_received_chunk_bytes_total)"
+printf 'localized Git-CDC edit' | dd of="$source_repo/asset.bin" bs=1 seek=3670000 conv=notrunc status=none
+git -C "$source_repo" add asset.bin
+git -C "$source_repo" commit -m 'Localized asset edit'
+git -C "$source_repo" push
+logical_after="$(metric git_cdc_logical_upload_bytes_total)"
+physical_after="$(metric git_cdc_received_chunk_bytes_total)"
+logical_delta=$((logical_after - logical_before))
+physical_delta=$((physical_after - physical_before))
+test "$logical_delta" -eq 7340123
+test "$physical_delta" -gt 0
+test "$physical_delta" -lt "$logical_delta"
+
+# Completed metadata and chunks must survive an ordinary service restart.
+stop_server
+start_server
 
 clone="$work/clone"
 GIT_LFS_SKIP_SMUDGE=1 git clone http://127.0.0.1:53000/alice/assets.git "$clone"

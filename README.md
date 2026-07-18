@@ -44,6 +44,15 @@ GIT_CDC_TEST_DATABASE_URL=postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc \
 GIT_CDC_TEST_MINIO=1 cargo test --workspace
 ```
 
+The repeatable black-box beta acceptance suite provisions disposable real
+dependencies, runs the complete workspace suite, exercises a private Forgejo
+repository through both Git-CDC and stock Git LFS, proves incremental transfer
+and service restart behavior, and verifies PostgreSQL/object-storage recovery:
+
+```console
+bash tests/acceptance.sh
+```
+
 ## Run the server
 
 The server fails closed if any required setting is absent:

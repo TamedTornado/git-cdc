@@ -44,25 +44,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Start real dependencies
-        run: |
-          docker compose -f docker-compose.test.yml up -d --wait postgres
-          docker compose -f docker-compose.test.yml up -d minio
-          docker compose -f docker-compose.test.yml run --rm minio-init
-      - name: Run complete workspace suite
-        env:
-          GIT_CDC_TEST_DATABASE_URL: postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc
-          GIT_CDC_TEST_MINIO: "1"
-        run: cargo test --workspace --locked
-      - name: Build Forgejo reference binaries
-        run: cargo build --locked -p git-cdc -p git-cdc-server --bins
-      - name: Stock and CDC clients share a real Forgejo repository
-        run: bash tests/forgejo_e2e.sh
-      - name: PostgreSQL and object storage restore into a working service
-        run: bash tests/backup_restore_e2e.sh
-      - name: Dependency logs on failure
-        if: failure()
-        run: docker compose -f docker-compose.test.yml logs
+      - name: Run beta acceptance suite
+        run: bash tests/acceptance.sh
 
   supply-chain:
     name: Supply chain
