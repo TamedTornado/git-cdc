@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -95,7 +96,8 @@ async fn forgejo_checks_repository_permission_on_every_request_and_observes_revo
         Url::parse("http://git-cdc.example/").unwrap(),
         forgejo_url,
     )
-    .unwrap();
+    .unwrap()
+    .with_forgejo_cache(Duration::from_millis(250), 100);
     let app = build_router(state);
 
     assert_eq!(
@@ -103,6 +105,12 @@ async fn forgejo_checks_repository_permission_on_every_request_and_observes_revo
         StatusCode::OK
     );
     valid.store(false, Ordering::SeqCst);
+    assert_eq!(
+        app.clone().oneshot(batch()).await.unwrap().status(),
+        StatusCode::OK,
+        "a successful decision remains valid for the bounded cache TTL"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         app.oneshot(batch()).await.unwrap().status(),
         StatusCode::UNAUTHORIZED

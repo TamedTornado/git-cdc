@@ -33,6 +33,8 @@ A v1 manifest contains:
 The beta profile uses a 512 KiB minimum, 2 MiB target, and 8 MiB maximum.
 Servers reject gaps, overlaps, empty chunks, size mismatches, wrong chunk
 digests, and a reconstructed SHA-256 that differs from `object_oid`.
+Production v1 also limits objects to 100 GiB and manifests to 204,800
+descriptors; every non-final chunk must meet the 512 KiB minimum.
 
 ## Upload
 
@@ -46,6 +48,8 @@ Session creation, identical chunk submission, and successful finalization are
 idempotent. Chunks may arrive in any order. Concurrent clients uploading the
 same OID converge on the same open session. Finalization verifies every chunk,
 the reconstructed length, and SHA-256 before atomically publishing metadata.
+Resuming an OID with a manifest different from its stored open session returns
+`409`; correct clients always reproduce the canonical deterministic manifest.
 
 Expired sessions are quarantined. Administrative reclamation observes a grace
 period and cannot remove a chunk referenced by a completed object or active

@@ -105,11 +105,46 @@ impl ChunkStore {
             Err(error) => Err(StorageError::Provider(error)),
         }
     }
+
+    /// Performs a provider-neutral write/read/delete readiness probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when any operation fails or returns unexpected
+    /// bytes. Probe objects use a reserved prefix and are removed on success.
+    pub async fn healthcheck(&self) -> Result<(), StorageError> {
+        let path = Path::from(format!("_health/{}", Uuid::new_v4()));
+        let expected = Bytes::from_static(b"git-cdc-ready");
+        self.inner
+            .put(&path, PutPayload::from(expected.clone()))
+            .await
+            .map_err(StorageError::Provider)?;
+        let actual = self
+            .inner
+            .get(&path)
+            .await
+            .map_err(StorageError::Provider)?
+            .bytes()
+            .await
+            .map_err(StorageError::Provider)?;
+        self.inner
+            .delete(&path)
+            .await
+            .map_err(StorageError::Provider)?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(StorageError::ProbeMismatch)
+        }
+    }
 }
 
 /// Integrity or provider failure while accessing immutable chunks.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    /// A readiness probe read bytes different from those just written.
+    #[error("object storage readiness probe returned unexpected bytes")]
+    ProbeMismatch,
     /// Bytes did not hash to their claimed BLAKE3 identity.
     #[error("chunk digest mismatch: expected {expected}, received {actual}")]
     DigestMismatch {

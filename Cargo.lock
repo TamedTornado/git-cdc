@@ -482,6 +482,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-queue"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -830,12 +839,13 @@ dependencies = [
 
 [[package]]
 name = "git-cdc"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "axum",
  "blake3",
  "bytes",
  "clap",
+ "crossbeam-channel",
  "directories",
  "git-cdc-core",
  "git-cdc-protocol",
@@ -852,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-core"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -866,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-protocol"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "git-cdc-core",
  "serde",
@@ -878,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-server"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "axum",
  "bytes",
@@ -913,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "git-cdc-storage"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blake3",
  "bytes",

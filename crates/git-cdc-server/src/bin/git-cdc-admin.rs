@@ -19,6 +19,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Exits successfully when a running server reports readiness.
+    Healthcheck {
+        #[arg(long, default_value = "http://127.0.0.1:8080/readyz")]
+        url: String,
+    },
     /// Creates an explicit repository mapping.
     RepositoryAdd { owner: String, name: String },
     /// Creates or replaces one OIDC subject grant.
@@ -54,11 +59,27 @@ enum Commands {
 }
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the administrative binary keeps explicit one-shot command dispatch in one place"
+)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if let Commands::Healthcheck { url } = &cli.command {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .build()?
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?;
+        return Ok(());
+    }
     let pool = PgPool::connect(&required("GIT_CDC_DATABASE_URL")?).await?;
     migrate(&pool).await?;
     match cli.command {
+        Commands::Healthcheck { .. } => return Err("healthcheck dispatch failed".into()),
         Commands::RepositoryAdd { owner, name } => {
             let id = Uuid::new_v4();
             let id: Uuid = sqlx::query_scalar(

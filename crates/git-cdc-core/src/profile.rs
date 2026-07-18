@@ -15,7 +15,9 @@ impl ChunkingProfile {
         Self::FastCdcV1
     }
 
-    pub(crate) const fn sizes(self) -> (usize, usize, usize) {
+    /// Returns the minimum, target, and maximum chunk sizes for this profile.
+    #[must_use]
+    pub const fn sizes(self) -> (usize, usize, usize) {
         match self {
             Self::FastCdcV1 => (512 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024),
         }

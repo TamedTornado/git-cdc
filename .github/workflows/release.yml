@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --workspace --bins --target ${{ matrix.target }}
+      - name: Package Unix binaries
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/git-cdc release/
+          cp target/${{ matrix.target }}/release/git-cdc-server release/
+          cp target/${{ matrix.target }}/release/git-cdc-admin release/
+          tar -C release -czf git-cdc-${{ github.ref_name }}-${{ matrix.target }}.tar.gz .
+          shasum -a 256 git-cdc-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > git-cdc-${{ github.ref_name }}-${{ matrix.target }}.sha256
+      - name: Package Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release
+          Copy-Item target/${{ matrix.target }}/release/git-cdc.exe release/
+          Copy-Item target/${{ matrix.target }}/release/git-cdc-server.exe release/
+          Copy-Item target/${{ matrix.target }}/release/git-cdc-admin.exe release/
+          Compress-Archive release/* git-cdc-${{ github.ref_name }}-${{ matrix.target }}.zip
+          (Get-FileHash git-cdc-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower() + "  git-cdc-${{ github.ref_name }}-${{ matrix.target }}.zip" | Out-File git-cdc-${{ github.ref_name }}-${{ matrix.target }}.sha256
+      - uses: anchore/sbom-action@v0
+        with:
+          path: target/${{ matrix.target }}/release
+          format: spdx-json
+          output-file: git-cdc-${{ github.ref_name }}-${{ matrix.target }}.spdx.json
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            git-cdc-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: image
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          sbom: true
+          provenance: mode=max
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

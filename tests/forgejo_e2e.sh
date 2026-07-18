@@ -94,14 +94,15 @@ git -C "$source_repo" lfs install --local
 (cd "$source_repo" && "$root/target/debug/git-cdc" status) | grep -Fq 'lfs.customtransfer.cdc.args=transfer'
 (cd "$source_repo" && "$root/target/debug/git-cdc" status) | grep -Fq 'lfs.url=http://127.0.0.1:58080/alice/assets/info/lfs'
 git -C "$source_repo" lfs track '*.bin'
-head -c 7340123 /dev/urandom >"$source_repo/asset.bin"
+asset_bytes="${GIT_CDC_ACCEPTANCE_ASSET_BYTES:-268435456}"
+head -c "$asset_bytes" /dev/urandom >"$source_repo/asset.bin"
 git -C "$source_repo" add .gitattributes asset.bin
 git -C "$source_repo" commit -m 'Forgejo CDC fixture'
 git -C "$source_repo" push --set-upstream origin master
 
 logical_before="$(metric git_cdc_logical_upload_bytes_total)"
 physical_before="$(metric git_cdc_received_chunk_bytes_total)"
-printf 'localized Git-CDC edit' | dd of="$source_repo/asset.bin" bs=1 seek=3670000 conv=notrunc status=none
+printf 'localized Git-CDC edit' | dd of="$source_repo/asset.bin" bs=1 seek=$((asset_bytes / 2)) conv=notrunc status=none
 git -C "$source_repo" add asset.bin
 git -C "$source_repo" commit -m 'Localized asset edit'
 git -C "$source_repo" push
@@ -109,7 +110,7 @@ logical_after="$(metric git_cdc_logical_upload_bytes_total)"
 physical_after="$(metric git_cdc_received_chunk_bytes_total)"
 logical_delta=$((logical_after - logical_before))
 physical_delta=$((physical_after - physical_before))
-test "$logical_delta" -eq 7340123
+test "$logical_delta" -eq "$asset_bytes"
 test "$physical_delta" -gt 0
 test "$physical_delta" -lt "$logical_delta"
 

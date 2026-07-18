@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -21,6 +21,7 @@ blake3 = "1.8.5"
 axum = "0.8.9"
 bytes = "1.11"
 clap = { version = "4.6.2", features = ["derive"] }
+crossbeam-channel = "0.5.15"
 directories = "6.0.0"
 fastcdc = "4.0.1"
 futures-util = "0.3"
@@ -37,7 +38,7 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 subtle = "2.6"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.53.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.53.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["request-id", "trace"] }

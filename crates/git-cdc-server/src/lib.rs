@@ -6,24 +6,27 @@ pub mod reconcile;
 use std::{
     collections::{BTreeMap, HashMap},
     io::SeekFrom,
+    path::{Path as FilePath, PathBuf},
     str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
-use git_cdc_core::{ChunkStream, ObjectManifest, ObjectOid};
+use git_cdc_core::{ChunkDescriptor, ChunkStream, ObjectManifest, ObjectOid};
 use git_cdc_protocol::{
     BatchObjectError, BatchObjectResponse, BatchRequest, BatchResponse, BeginUploadRequest,
     BeginUploadResponse, LfsAction, Lock, LockList, LockOwner, LockRequest, LockResponse,
@@ -34,8 +37,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    sync::{Mutex, Semaphore},
+};
 use tokio_util::io::{ReaderStream, StreamReader};
+use tower_http::{
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::TraceLayer,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -49,6 +59,10 @@ pub struct AppState {
     base_url: Url,
     authentication: Authentication,
     metrics: Arc<ServiceMetrics>,
+    staging_root: PathBuf,
+    basic_transfers: Arc<Semaphore>,
+    data_requests: Arc<Semaphore>,
+    storage_ready_until: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Default)]
@@ -56,6 +70,12 @@ struct ServiceMetrics {
     logical_uploaded: AtomicU64,
     logical_downloaded: AtomicU64,
     chunks_received: AtomicU64,
+    auth_cache_hits: AtomicU64,
+    auth_cache_misses: AtomicU64,
+    forgejo_requests: AtomicU64,
+    http_requests: AtomicU64,
+    http_failures: AtomicU64,
+    in_flight: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -66,12 +86,27 @@ enum Authentication {
     Forgejo {
         base_url: Url,
         client: reqwest::Client,
+        cache: ForgejoAuthorizationCache,
     },
     Oidc {
         issuer: String,
         audience: String,
         keys: HashMap<String, jsonwebtoken::jwk::Jwk>,
     },
+}
+
+#[derive(Clone)]
+struct ForgejoAuthorizationCache {
+    entries: Arc<Mutex<HashMap<[u8; 32], CachedForgejoIdentity>>>,
+    ttl: Duration,
+    capacity: usize,
+}
+
+#[derive(Clone)]
+struct CachedForgejoIdentity {
+    subject: String,
+    administrator: bool,
+    expires_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -115,6 +150,10 @@ impl AppState {
                 hash: Sha256::digest(dev_token.as_bytes()).into(),
             },
             metrics: Arc::default(),
+            staging_root: std::env::temp_dir(),
+            basic_transfers: Arc::new(Semaphore::new(2)),
+            data_requests: Arc::new(Semaphore::new(64)),
+            storage_ready_until: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -138,9 +177,21 @@ impl AppState {
             base_url,
             authentication: Authentication::Forgejo {
                 base_url: forgejo_url,
-                client: reqwest::Client::builder().build()?,
+                client: reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(10))
+                    .build()?,
+                cache: ForgejoAuthorizationCache {
+                    entries: Arc::new(Mutex::new(HashMap::new())),
+                    ttl: Duration::from_secs(30),
+                    capacity: 10_000,
+                },
             },
             metrics: Arc::default(),
+            staging_root: std::env::temp_dir(),
+            basic_transfers: Arc::new(Semaphore::new(2)),
+            data_requests: Arc::new(Semaphore::new(64)),
+            storage_ready_until: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -190,7 +241,36 @@ impl AppState {
                 keys,
             },
             metrics: Arc::default(),
+            staging_root: std::env::temp_dir(),
+            basic_transfers: Arc::new(Semaphore::new(2)),
+            data_requests: Arc::new(Semaphore::new(64)),
+            storage_ready_until: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Configures the bounded staging directory used by stock basic transfers.
+    #[must_use]
+    pub fn with_staging(mut self, root: impl AsRef<FilePath>, maximum_transfers: usize) -> Self {
+        self.staging_root = root.as_ref().to_path_buf();
+        self.basic_transfers = Arc::new(Semaphore::new(maximum_transfers.max(1)));
+        self
+    }
+
+    /// Configures the maximum concurrent chunk/finalization data-plane work.
+    #[must_use]
+    pub fn with_data_limit(mut self, maximum_requests: usize) -> Self {
+        self.data_requests = Arc::new(Semaphore::new(maximum_requests.max(1)));
+        self
+    }
+
+    /// Overrides Forgejo authorization-cache policy for deployment or tests.
+    #[must_use]
+    pub fn with_forgejo_cache(mut self, ttl: Duration, capacity: usize) -> Self {
+        if let Authentication::Forgejo { cache, .. } = &mut self.authentication {
+            cache.ttl = ttl;
+            cache.capacity = capacity.max(1);
+        }
+        self
     }
 }
 
@@ -230,6 +310,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
 
 /// Builds the public HTTP router for one configured service instance.
 pub fn build_router(state: AppState) -> Router {
+    let request_id = header::HeaderName::from_static("x-request-id");
     Router::new()
         .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
         .route("/readyz", get(readiness))
@@ -267,8 +348,30 @@ pub fn build_router(state: AppState) -> Router {
             "/{owner}/{repository}/info/lfs/locks/{lock_id}/unlock",
             post(unlock),
         )
-        .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(TraceLayer::new_for_http())
+        .layer(PropagateRequestIdLayer::new(request_id.clone()))
+        .layer(SetRequestIdLayer::new(request_id, MakeRequestUuid))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            record_http_metrics,
+        ))
         .with_state(state)
+}
+
+async fn record_http_metrics(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    state.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+    let response = next.run(request).await;
+    state.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+    state.metrics.http_requests.fetch_add(1, Ordering::Relaxed);
+    if response.status().is_server_error() {
+        state.metrics.http_failures.fetch_add(1, Ordering::Relaxed);
+    }
+    response
 }
 
 async fn readiness(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
@@ -276,6 +379,19 @@ async fn readiness(State(state): State<AppState>) -> Result<StatusCode, ApiError
         .fetch_one(&state.pool)
         .await
         .map_err(|error| ApiError::database(&error))?;
+    let storage_is_fresh = state
+        .storage_ready_until
+        .lock()
+        .await
+        .is_some_and(|until| until > Instant::now());
+    if !storage_is_fresh {
+        state
+            .chunks
+            .healthcheck()
+            .await
+            .map_err(ApiError::storage)?;
+        *state.storage_ready_until.lock().await = Some(Instant::now() + Duration::from_secs(10));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -286,10 +402,28 @@ git_cdc_logical_upload_bytes_total {}\n\
 # TYPE git_cdc_logical_download_bytes_total counter\n\
 git_cdc_logical_download_bytes_total {}\n\
 # TYPE git_cdc_received_chunk_bytes_total counter\n\
-git_cdc_received_chunk_bytes_total {}\n",
+git_cdc_received_chunk_bytes_total {}\n\
+# TYPE git_cdc_forgejo_auth_cache_hits_total counter\n\
+git_cdc_forgejo_auth_cache_hits_total {}\n\
+# TYPE git_cdc_forgejo_auth_cache_misses_total counter\n\
+git_cdc_forgejo_auth_cache_misses_total {}\n\
+# TYPE git_cdc_forgejo_requests_total counter\n\
+git_cdc_forgejo_requests_total {}\n\
+# TYPE git_cdc_http_requests_total counter\n\
+git_cdc_http_requests_total {}\n\
+# TYPE git_cdc_http_failures_total counter\n\
+git_cdc_http_failures_total {}\n\
+# TYPE git_cdc_http_in_flight gauge\n\
+git_cdc_http_in_flight {}\n",
         state.metrics.logical_uploaded.load(Ordering::Relaxed),
         state.metrics.logical_downloaded.load(Ordering::Relaxed),
         state.metrics.chunks_received.load(Ordering::Relaxed),
+        state.metrics.auth_cache_hits.load(Ordering::Relaxed),
+        state.metrics.auth_cache_misses.load(Ordering::Relaxed),
+        state.metrics.forgejo_requests.load(Ordering::Relaxed),
+        state.metrics.http_requests.load(Ordering::Relaxed),
+        state.metrics.http_failures.load(Ordering::Relaxed),
+        state.metrics.in_flight.load(Ordering::Relaxed),
     )
 }
 
@@ -505,15 +639,40 @@ async fn upload_basic(
     authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
-    let temporary = tempfile::NamedTempFile::new().map_err(ApiError::io)?;
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > git_cdc_core::MAX_OBJECT_SIZE)
+    {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "object exceeds the 100 GiB production limit",
+        ));
+    }
+    let _permit =
+        state.basic_transfers.acquire().await.map_err(|_| {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")
+        })?;
+    tokio::fs::create_dir_all(&state.staging_root)
+        .await
+        .map_err(ApiError::io)?;
+    let temporary = tempfile::NamedTempFile::new_in(&state.staging_root).map_err(ApiError::io)?;
     let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(ApiError::io)?);
-    let mut reader = StreamReader::new(
+    let reader = StreamReader::new(
         body.into_data_stream()
             .map_err(|error| std::io::Error::other(error.to_string())),
     );
-    tokio::io::copy(&mut reader, &mut file)
+    let mut limited = reader.take(git_cdc_core::MAX_OBJECT_SIZE + 1);
+    let copied = tokio::io::copy(&mut limited, &mut file)
         .await
         .map_err(ApiError::io)?;
+    if copied > git_cdc_core::MAX_OBJECT_SIZE {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "object exceeds the 100 GiB production limit",
+        ));
+    }
     file.flush().await.map_err(ApiError::io)?;
 
     let source = temporary.reopen().map_err(ApiError::io)?;
@@ -531,6 +690,7 @@ async fn upload_basic(
             "uploaded bytes do not match the requested object OID",
         ));
     }
+    let upload_id = ensure_upload_session(&state, repository_id, &manifest).await?;
 
     let source = temporary.reopen().map_err(ApiError::io)?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -548,21 +708,26 @@ async fn upload_basic(
             .map_err(|error| error.to_string())
     });
     while let Some(chunk) = receiver.recv().await {
-        state
-            .chunks
-            .put_verified(repository_id, chunk.descriptor.id, Bytes::from(chunk.data))
-            .await
-            .map_err(ApiError::storage)?;
+        register_and_store_chunk(
+            &state,
+            repository_id,
+            upload_id,
+            &chunk.descriptor,
+            Bytes::from(chunk.data),
+        )
+        .await?;
     }
     producer
         .await
         .map_err(ApiError::join)?
         .map_err(|message| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message))?;
-    publish_manifest(&state, repository_id, &manifest).await?;
-    state
-        .metrics
-        .logical_uploaded
-        .fetch_add(manifest.object_size, Ordering::Relaxed);
+    let published = publish_manifest(&state, repository_id, upload_id, &manifest).await?;
+    if published {
+        state
+            .metrics
+            .logical_uploaded
+            .fetch_add(manifest.object_size, Ordering::Relaxed);
+    }
     state
         .metrics
         .chunks_received
@@ -578,11 +743,20 @@ async fn download_basic(
     authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
+    let permit = state
+        .basic_transfers
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down"))?;
     let manifest = load_manifest(&state, repository_id, oid).await?;
     manifest
         .validate()
         .map_err(|error| ApiError::integrity(error.to_string()))?;
-    let temporary = tempfile::NamedTempFile::new().map_err(ApiError::io)?;
+    tokio::fs::create_dir_all(&state.staging_root)
+        .await
+        .map_err(ApiError::io)?;
+    let temporary = tempfile::NamedTempFile::new_in(&state.staging_root).map_err(ApiError::io)?;
     let (standard_file, temporary_path) = temporary.into_parts();
     let mut file = tokio::fs::File::from_std(standard_file);
     let mut hasher = Sha256::new();
@@ -607,6 +781,7 @@ async fn download_basic(
     file.seek(SeekFrom::Start(0)).await.map_err(ApiError::io)?;
     let stream = ReaderStream::new(file).map(move |result| {
         let _keep_until_stream_ends = &temporary_path;
+        let _hold_transfer_slot = &permit;
         result
     });
     state
@@ -663,12 +838,13 @@ async fn begin_cdc(
     .execute(&mut *transaction)
     .await
     .map_err(|error| ApiError::database(&error))?;
-    let (upload_id, expires_at) = sqlx::query_as::<_, (Uuid, String)>(
+    let (upload_id, expires_at, stored_manifest) =
+        sqlx::query_as::<_, (Uuid, String, serde_json::Value)>(
         "INSERT INTO upload_sessions (id, repository_id, object_oid, object_size, manifest, state, expires_at) \
          VALUES ($1, $2, $3, $4, $5, 'open', now() + interval '24 hours') \
          ON CONFLICT (repository_id, object_oid) WHERE state = 'open' \
          DO UPDATE SET expires_at = now() + interval '24 hours' \
-         RETURNING id, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+         RETURNING id, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), manifest",
     )
     .bind(Uuid::new_v4())
     .bind(repository_id)
@@ -680,12 +856,20 @@ async fn begin_cdc(
     .fetch_one(&mut *transaction)
     .await
     .map_err(|error| ApiError::database(&error))?;
+    let stored_manifest: ObjectManifest = serde_json::from_value(stored_manifest)
+        .map_err(|error| ApiError::integrity(error.to_string()))?;
+    if stored_manifest != request.manifest {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "an open upload for this OID uses a different manifest",
+        ));
+    }
     transaction
         .commit()
         .await
         .map_err(|error| ApiError::database(&error))?;
     let mut missing_chunk_indexes = Vec::new();
-    for (index, descriptor) in request.manifest.chunks.iter().enumerate() {
+    for (index, descriptor) in stored_manifest.chunks.iter().enumerate() {
         if !state
             .chunks
             .exists(repository_id, descriptor.id)
@@ -714,6 +898,10 @@ async fn upload_cdc_chunk(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<StatusCode, ApiError> {
+    let _permit =
+        state.data_requests.acquire().await.map_err(|_| {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")
+        })?;
     authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
@@ -728,35 +916,11 @@ async fn upload_cdc_chunk(
         ));
     }
     let received = bytes.len() as u64;
-    state
-        .chunks
-        .put_verified(repository_id, descriptor.id, bytes)
-        .await
-        .map_err(ApiError::storage)?;
+    register_and_store_chunk(&state, repository_id, upload_id, descriptor, bytes).await?;
     state
         .metrics
         .chunks_received
         .fetch_add(received, Ordering::Relaxed);
-    sqlx::query(
-        "INSERT INTO chunks (repository_id, chunk_id, size) VALUES ($1, $2, $3) \
-         ON CONFLICT (repository_id, chunk_id) DO NOTHING",
-    )
-    .bind(repository_id)
-    .bind(descriptor.id.as_bytes().as_slice())
-    .bind(i64::from(descriptor.length))
-    .execute(&state.pool)
-    .await
-    .map_err(|error| ApiError::database(&error))?;
-    sqlx::query(
-        "INSERT INTO upload_session_chunks (session_id, repository_id, chunk_id) \
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-    )
-    .bind(upload_id)
-    .bind(repository_id)
-    .bind(descriptor.id.as_bytes().as_slice())
-    .execute(&state.pool)
-    .await
-    .map_err(|error| ApiError::database(&error))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -765,6 +929,10 @@ async fn finalize_cdc(
     Path((owner, repository, oid, upload_id)): Path<(String, String, String, Uuid)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    let _permit =
+        state.data_requests.acquire().await.map_err(|_| {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")
+        })?;
     authenticate(&state, &headers, &owner, &repository, Access::Write).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
@@ -799,16 +967,13 @@ async fn finalize_cdc(
             "object SHA-256 mismatch",
         ));
     }
-    publish_manifest(&state, repository_id, &manifest).await?;
-    state
-        .metrics
-        .logical_uploaded
-        .fetch_add(manifest.object_size, Ordering::Relaxed);
-    sqlx::query("UPDATE upload_sessions SET state = 'finalized' WHERE id = $1 AND state = 'open'")
-        .bind(upload_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|error| ApiError::database(&error))?;
+    let published = publish_manifest(&state, repository_id, upload_id, &manifest).await?;
+    if published {
+        state
+            .metrics
+            .logical_uploaded
+            .fetch_add(manifest.object_size, Ordering::Relaxed);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -828,6 +993,10 @@ async fn download_cdc_chunk(
     Path((owner, repository, oid, index)): Path<(String, String, String, usize)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let _permit =
+        state.data_requests.acquire().await.map_err(|_| {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server is shutting down")
+        })?;
     authenticate(&state, &headers, &owner, &repository, Access::Read).await?;
     let oid = parse_oid(&oid)?;
     let repository_id = repository_id(&state, &owner, &repository).await?;
@@ -854,6 +1023,12 @@ async fn batch(
     headers: HeaderMap,
     Json(request): Json<BatchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if request.objects.len() > 1_000 {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "batch contains more than 1,000 objects",
+        ));
+    }
     let access = match request.operation {
         Operation::Upload => Access::Write,
         Operation::Download => Access::Read,
@@ -952,8 +1127,15 @@ async fn authenticate(
                 Err(ApiError::unauthorized())
             }
         }
-        Authentication::Forgejo { base_url, client } => {
-            authenticate_forgejo(base_url, client, value, owner, repository, access).await
+        Authentication::Forgejo {
+            base_url,
+            client,
+            cache,
+        } => {
+            authenticate_forgejo(
+                state, base_url, client, cache, value, owner, repository, access,
+            )
+            .await
         }
         Authentication::Oidc {
             issuer,
@@ -977,14 +1159,53 @@ async fn authenticate(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the adapter keeps cache lookup and the two fail-closed Forgejo checks together"
+)]
 async fn authenticate_forgejo(
+    state: &AppState,
     base_url: &Url,
     client: &reqwest::Client,
+    cache: &ForgejoAuthorizationCache,
     authorization: &str,
     owner: &str,
     repository_name: &str,
     access: Access,
 ) -> Result<Identity, ApiError> {
+    let mut key_hasher = Sha256::new();
+    key_hasher.update(authorization.as_bytes());
+    key_hasher.update([0]);
+    key_hasher.update(owner.as_bytes());
+    key_hasher.update([0]);
+    key_hasher.update(repository_name.as_bytes());
+    key_hasher.update([match access {
+        Access::Read => 0,
+        Access::Write => 1,
+    }]);
+    let cache_key: [u8; 32] = key_hasher.finalize().into();
+    {
+        let mut entries = cache.entries.lock().await;
+        if let Some(cached) = entries.get(&cache_key) {
+            if cached.expires_at > Instant::now() {
+                state
+                    .metrics
+                    .auth_cache_hits
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(Identity {
+                    authorization: authorization.to_owned(),
+                    subject: cached.subject.clone(),
+                    administrator: cached.administrator,
+                });
+            }
+            entries.remove(&cache_key);
+        }
+    }
+    state
+        .metrics
+        .auth_cache_misses
+        .fetch_add(1, Ordering::Relaxed);
     let user_url = base_url
         .join("api/v1/user")
         .map_err(|error| ApiError::authentication(error.to_string()))?;
@@ -993,6 +1214,10 @@ async fn authenticate_forgejo(
         .path_segments_mut()
         .map_err(|()| ApiError::authentication("invalid Forgejo URL"))?
         .extend(["api", "v1", "repos", owner, repository_name]);
+    state
+        .metrics
+        .forgejo_requests
+        .fetch_add(1, Ordering::Relaxed);
     let user_response = client
         .get(user_url)
         .header(header::AUTHORIZATION, authorization)
@@ -1006,6 +1231,10 @@ async fn authenticate_forgejo(
         .json()
         .await
         .map_err(|error| ApiError::authentication(error.to_string()))?;
+    state
+        .metrics
+        .forgejo_requests
+        .fetch_add(1, Ordering::Relaxed);
     let repo_response = client
         .get(repo_url)
         .header(header::AUTHORIZATION, authorization)
@@ -1038,11 +1267,31 @@ async fn authenticate_forgejo(
             "repository access denied",
         ));
     }
-    Ok(Identity {
+    let identity = Identity {
         authorization: authorization.to_owned(),
         subject: user.login,
         administrator: repository.permissions.admin,
-    })
+    };
+    let mut entries = cache.entries.lock().await;
+    entries.retain(|_, value| value.expires_at > Instant::now());
+    if entries.len() >= cache.capacity {
+        if let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, value)| value.expires_at)
+            .map(|(key, _)| *key)
+        {
+            entries.remove(&oldest);
+        }
+    }
+    entries.insert(
+        cache_key,
+        CachedForgejoIdentity {
+            subject: identity.subject.clone(),
+            administrator: identity.administrator,
+            expires_at: Instant::now() + cache.ttl,
+        },
+    );
+    Ok(identity)
 }
 
 struct OidcTrust<'a> {
@@ -1199,6 +1448,106 @@ async fn load_open_upload(
     serde_json::from_value(value).map_err(|error| ApiError::integrity(error.to_string()))
 }
 
+async fn ensure_upload_session(
+    state: &AppState,
+    repository_id: Uuid,
+    manifest: &ObjectManifest,
+) -> Result<Uuid, ApiError> {
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    sqlx::query(
+        "UPDATE upload_sessions SET state = 'expired' \
+         WHERE repository_id = $1 AND object_oid = $2 \
+           AND state = 'open' AND expires_at <= now()",
+    )
+    .bind(repository_id)
+    .bind(manifest.object_oid.as_bytes().as_slice())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| ApiError::database(&error))?;
+    let (id, stored): (Uuid, serde_json::Value) = sqlx::query_as(
+        "INSERT INTO upload_sessions \
+         (id, repository_id, object_oid, object_size, manifest, state, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, 'open', now() + interval '24 hours') \
+         ON CONFLICT (repository_id, object_oid) WHERE state = 'open' \
+         DO UPDATE SET expires_at = now() + interval '24 hours' \
+         RETURNING id, manifest",
+    )
+    .bind(Uuid::new_v4())
+    .bind(repository_id)
+    .bind(manifest.object_oid.as_bytes().as_slice())
+    .bind(i64::try_from(manifest.object_size).map_err(|_| ApiError::integrity("object too large"))?)
+    .bind(serde_json::to_value(manifest).map_err(|error| ApiError::integrity(error.to_string()))?)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| ApiError::database(&error))?;
+    let stored: ObjectManifest =
+        serde_json::from_value(stored).map_err(|error| ApiError::integrity(error.to_string()))?;
+    if stored != *manifest {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "an open upload for this OID uses a different manifest",
+        ));
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    Ok(id)
+}
+
+async fn register_and_store_chunk(
+    state: &AppState,
+    repository_id: Uuid,
+    upload_id: Uuid,
+    descriptor: &ChunkDescriptor,
+    bytes: Bytes,
+) -> Result<(), ApiError> {
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    let registered = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO chunks (repository_id, chunk_id, size) VALUES ($1, $2, $3) \
+         ON CONFLICT (repository_id, chunk_id) DO UPDATE SET size = chunks.size \
+         WHERE chunks.size = EXCLUDED.size RETURNING size",
+    )
+    .bind(repository_id)
+    .bind(descriptor.id.as_bytes().as_slice())
+    .bind(i64::from(descriptor.length))
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| ApiError::database(&error))?;
+    if registered.is_none() {
+        return Err(ApiError::integrity(
+            "chunk metadata disagrees with the manifest length",
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO upload_session_chunks (session_id, repository_id, chunk_id) \
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(upload_id)
+    .bind(repository_id)
+    .bind(descriptor.id.as_bytes().as_slice())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| ApiError::database(&error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ApiError::database(&error))?;
+    state
+        .chunks
+        .put_verified(repository_id, descriptor.id, bytes)
+        .await
+        .map_err(ApiError::storage)
+}
+
 async fn load_finalizable_upload(
     state: &AppState,
     repository_id: Uuid,
@@ -1222,11 +1571,16 @@ async fn load_finalizable_upload(
     Ok((manifest, row.1 == "finalized"))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "publication is one auditable PostgreSQL transaction with ordered integrity updates"
+)]
 async fn publish_manifest(
     state: &AppState,
     repository_id: Uuid,
+    upload_id: Uuid,
     manifest: &ObjectManifest,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     manifest
         .validate()
         .map_err(|error| ApiError::integrity(error.to_string()))?;
@@ -1235,6 +1589,31 @@ async fn publish_manifest(
         .begin()
         .await
         .map_err(|error| ApiError::database(&error))?;
+    let session_state: String = sqlx::query_scalar(
+        "SELECT state FROM upload_sessions \
+         WHERE id = $1 AND repository_id = $2 AND object_oid = $3 \
+           AND ((state = 'open' AND expires_at > now()) OR state = 'finalized') FOR UPDATE",
+    )
+    .bind(upload_id)
+    .bind(repository_id)
+    .bind(manifest.object_oid.as_bytes().as_slice())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| ApiError::database(&error))?
+    .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "upload session not found"))?;
+    if session_state == "finalized" {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| ApiError::database(&error))?;
+        return Ok(false);
+    }
+    if session_state != "open" {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "open upload session not found",
+        ));
+    }
     for descriptor in &manifest.chunks {
         sqlx::query(
             "INSERT INTO chunks (repository_id, chunk_id, size) VALUES ($1, $2, $3) \
@@ -1292,11 +1671,16 @@ async fn publish_manifest(
             .map_err(|error| ApiError::database(&error))?;
         }
     }
+    sqlx::query("UPDATE upload_sessions SET state = 'finalized' WHERE id = $1")
+        .bind(upload_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ApiError::database(&error))?;
     transaction
         .commit()
         .await
         .map_err(|error| ApiError::database(&error))?;
-    Ok(())
+    Ok(inserted == 1)
 }
 
 #[derive(Debug)]

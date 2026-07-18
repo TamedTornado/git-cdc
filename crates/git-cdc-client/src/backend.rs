@@ -1,9 +1,12 @@
 //! Bounded-memory HTTP implementation of the CDC transfer data plane.
 
 use std::{
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::Write,
     path::PathBuf,
+    thread,
+    time::Duration,
 };
 
 use git_cdc_core::{ChunkStream, ChunkingProfile, ObjectManifest};
@@ -20,6 +23,7 @@ use crate::{
 pub struct HttpBackend {
     client: Client,
     cache_root: PathBuf,
+    chunk_concurrency: usize,
 }
 
 impl HttpBackend {
@@ -29,14 +33,93 @@ impl HttpBackend {
     ///
     /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(cache_root: PathBuf) -> Result<Self, BackendError> {
+        let connect_timeout = environment_u64("GIT_CDC_HTTP_CONNECT_TIMEOUT_SECONDS", 10)?;
+        let request_timeout = environment_u64("GIT_CDC_HTTP_REQUEST_TIMEOUT_SECONDS", 300)?;
+        let chunk_concurrency = environment_usize("GIT_CDC_CHUNK_CONCURRENCY", 2)?.clamp(1, 8);
         let client = Client::builder()
+            .connect_timeout(Duration::from_secs(connect_timeout))
+            .timeout(Duration::from_secs(request_timeout))
             .build()
             .map_err(|error| failure(format!("could not create HTTP client: {error}")))?;
-        Ok(Self { client, cache_root })
+        Ok(Self {
+            client,
+            cache_root,
+            chunk_concurrency,
+        })
     }
 
     fn action(action: Option<&TransferAction>) -> Result<&TransferAction, BackendError> {
         action.ok_or_else(|| failure("server did not provide a CDC transfer action"))
+    }
+
+    fn begin_upload(
+        &self,
+        action: &TransferAction,
+        begin: &BeginUploadRequest,
+    ) -> Result<BeginUploadResponse, BackendError> {
+        for attempt in 0..3_u32 {
+            match Self::authorized(self.client.post(&action.href), action)
+                .json(begin)
+                .send()
+            {
+                Ok(response) if response.status().is_success() => {
+                    return response
+                        .json()
+                        .map_err(|error| failure(format!("invalid CDC upload plan: {error}")));
+                }
+                Ok(response) if retryable_status(response.status()) && attempt < 2 => {
+                    thread::sleep(
+                        retry_after(&response)
+                            .unwrap_or_else(|| Duration::from_millis(100 * 2_u64.pow(attempt))),
+                    );
+                }
+                Ok(response) => {
+                    return Err(failure(format!(
+                        "could not begin CDC upload: HTTP {}",
+                        response.status()
+                    )));
+                }
+                Err(_) if attempt < 2 => {
+                    thread::sleep(Duration::from_millis(100 * 2_u64.pow(attempt)));
+                }
+                Err(error) => {
+                    return Err(failure(format!("could not begin CDC upload: {error}")));
+                }
+            }
+        }
+        Err(failure("could not begin CDC upload after retries"))
+    }
+
+    fn finalize_upload(
+        &self,
+        action: &TransferAction,
+        upload_id: uuid::Uuid,
+    ) -> Result<(), BackendError> {
+        let url = child_url(&action.href, &[&upload_id.to_string(), "finalize"])?;
+        for attempt in 0..3_u32 {
+            match Self::authorized(self.client.post(url.clone()), action).send() {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) if retryable_status(response.status()) && attempt < 2 => {
+                    thread::sleep(
+                        retry_after(&response)
+                            .unwrap_or_else(|| Duration::from_millis(100 * 2_u64.pow(attempt))),
+                    );
+                }
+                Ok(response) => {
+                    return Err(failure(format!(
+                        "could not finalize CDC upload: HTTP {}",
+                        response.status()
+                    )));
+                }
+                Err(_) if attempt < 2 => {
+                    thread::sleep(Duration::from_millis(100 * 2_u64.pow(attempt)));
+                }
+                Err(error) => {
+                    return Err(failure(format!("could not finalize CDC upload: {error}")));
+                }
+            }
+        }
+        Err(failure("could not finalize CDC upload after retries"))
     }
 
     fn authorized(builder: RequestBuilder, action: &TransferAction) -> RequestBuilder {
@@ -72,14 +155,44 @@ impl HttpBackend {
             })?;
         }
         let url = child_url(&action.href, &["chunks", &index.to_string()])?;
-        let response = Self::authorized(self.client.get(url), action)
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| failure(format!("chunk download failed: {error}")))?;
-        let bytes = response
-            .bytes()
-            .map_err(|error| failure(format!("could not read chunk response: {error}")))?
-            .to_vec();
+        let mut downloaded = None;
+        let mut last_error = None;
+        for attempt in 0..3_u32 {
+            let mut delay = Duration::from_millis(100 * 2_u64.pow(attempt));
+            match Self::authorized(self.client.get(url.clone()), action).send() {
+                Ok(response) if response.status().is_success() => {
+                    downloaded = Some(
+                        response
+                            .bytes()
+                            .map_err(|error| {
+                                failure(format!("could not read chunk response: {error}"))
+                            })?
+                            .to_vec(),
+                    );
+                    break;
+                }
+                Ok(response) if retryable_status(response.status()) => {
+                    delay = retry_after(&response).unwrap_or(delay);
+                    last_error = Some(format!("HTTP {}", response.status()));
+                }
+                Ok(response) => {
+                    return Err(failure(format!(
+                        "chunk download failed with HTTP {}",
+                        response.status()
+                    )));
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+            if attempt < 2 {
+                thread::sleep(delay);
+            }
+        }
+        let bytes = downloaded.ok_or_else(|| {
+            failure(format!(
+                "chunk download failed after retries: {}",
+                last_error.unwrap_or_else(|| "unknown transport failure".into())
+            ))
+        })?;
         if !valid_chunk(&bytes, descriptor) {
             return Err(failure(
                 "downloaded chunk failed length or BLAKE3 validation",
@@ -107,6 +220,47 @@ impl HttpBackend {
         }
         Ok(bytes)
     }
+
+    fn upload_chunk_with_retry(
+        &self,
+        action: &TransferAction,
+        upload_id: uuid::Uuid,
+        index: u32,
+        bytes: &[u8],
+    ) -> Result<(), BackendError> {
+        let url = child_url(
+            &action.href,
+            &[&upload_id.to_string(), "chunks", &index.to_string()],
+        )?;
+        let mut last_error = None;
+        for attempt in 0..3_u32 {
+            let mut delay = Duration::from_millis(100 * 2_u64.pow(attempt));
+            match Self::authorized(self.client.put(url.clone()), action)
+                .body(bytes.to_vec())
+                .send()
+            {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) if retryable_status(response.status()) => {
+                    delay = retry_after(&response).unwrap_or(delay);
+                    last_error = Some(format!("HTTP {}", response.status()));
+                }
+                Ok(response) => {
+                    return Err(failure(format!(
+                        "chunk upload failed with HTTP {}",
+                        response.status()
+                    )));
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+            if attempt < 2 {
+                thread::sleep(delay);
+            }
+        }
+        Err(failure(format!(
+            "chunk upload failed after retries: {}",
+            last_error.unwrap_or_else(|| "unknown transport failure".into())
+        )))
+    }
 }
 
 impl TransferBackend for HttpBackend {
@@ -126,36 +280,77 @@ impl TransferBackend for HttpBackend {
             protocol_version: 1,
             manifest,
         };
-        let plan: BeginUploadResponse = Self::authorized(self.client.post(&action.href), action)
-            .json(&begin)
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| failure(format!("could not begin CDC upload: {error}")))?
-            .json()
-            .map_err(|error| failure(format!("invalid CDC upload plan: {error}")))?;
+        let plan = self.begin_upload(action, &begin)?;
+        if plan.protocol_version != 1 {
+            return Err(failure(
+                "server selected an unsupported CDC protocol version",
+            ));
+        }
+        if plan
+            .missing_chunk_indexes
+            .iter()
+            .any(|index| *index as usize >= begin.manifest.chunks.len())
+        {
+            return Err(failure(
+                "server upload plan contains a chunk index outside the manifest",
+            ));
+        }
         let file = File::open(&request.path)
             .map_err(|error| failure(format!("could not reopen upload source: {error}")))?;
-        let mut stream = ChunkStream::new(file, ChunkingProfile::beta_v1());
-        for (index, chunk) in stream.by_ref().enumerate() {
-            let chunk = chunk.map_err(|error| failure(error.to_string()))?;
-            let index = u32::try_from(index).map_err(|_| failure("object has too many chunks"))?;
-            if plan.missing_chunk_indexes.contains(&index) {
-                let url = child_url(
-                    &action.href,
-                    &[&plan.upload_id.to_string(), "chunks", &index.to_string()],
-                )?;
-                Self::authorized(self.client.put(url), action)
-                    .body(chunk.data)
-                    .send()
-                    .and_then(reqwest::blocking::Response::error_for_status)
-                    .map_err(|error| failure(format!("chunk upload failed: {error}")))?;
-            }
+        let missing: HashSet<u32> = plan.missing_chunk_indexes.iter().copied().collect();
+        if missing.len() != plan.missing_chunk_indexes.len() {
+            return Err(failure(
+                "server upload plan contains duplicate chunk indexes",
+            ));
         }
-        let finalize = child_url(&action.href, &[&plan.upload_id.to_string(), "finalize"])?;
-        Self::authorized(self.client.post(finalize), action)
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| failure(format!("could not finalize CDC upload: {error}")))?;
+        let (jobs, work) = crossbeam_channel::bounded::<(u32, Vec<u8>)>(self.chunk_concurrency);
+        let (failures, errors) = crossbeam_channel::unbounded();
+        let mut producer_error = None;
+        thread::scope(|scope| {
+            for _ in 0..self.chunk_concurrency {
+                let work = work.clone();
+                let failures = failures.clone();
+                scope.spawn(move || {
+                    for (index, data) in work {
+                        if let Err(error) =
+                            self.upload_chunk_with_retry(action, plan.upload_id, index, &data)
+                        {
+                            let _ = failures.send(error);
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(work);
+            drop(failures);
+            let mut stream = ChunkStream::new(file, ChunkingProfile::beta_v1());
+            for (index, chunk) in stream.by_ref().enumerate() {
+                let result = chunk
+                    .map_err(|error| failure(error.to_string()))
+                    .and_then(|chunk| {
+                        let index = u32::try_from(index)
+                            .map_err(|_| failure("object has too many chunks"))?;
+                        if missing.contains(&index) {
+                            jobs.send((index, chunk.data))
+                                .map_err(|_| failure("chunk upload worker stopped"))?;
+                        }
+                        Ok(())
+                    });
+                if let Err(error) = result {
+                    producer_error = Some(error);
+                    break;
+                }
+                if let Ok(error) = errors.try_recv() {
+                    producer_error = Some(error);
+                    break;
+                }
+            }
+            drop(jobs);
+        });
+        if let Some(error) = producer_error.or_else(|| errors.try_recv().ok()) {
+            return Err(error);
+        }
+        self.finalize_upload(action, plan.upload_id)?;
         Ok(request.size)
     }
 
@@ -180,13 +375,53 @@ impl TransferBackend for HttpBackend {
         let mut temporary = tempfile::NamedTempFile::new_in(&self.cache_root)
             .map_err(|error| failure(format!("could not create download file: {error}")))?;
         let mut hasher = Sha256::new();
-        for (index, descriptor) in manifest.chunks.iter().enumerate() {
-            let bytes = self.read_or_fetch_chunk(action, index, descriptor)?;
-            hasher.update(&bytes);
-            temporary
-                .write_all(&bytes)
-                .map_err(|error| failure(format!("could not reconstruct download: {error}")))?;
-        }
+        let (jobs, work) = crossbeam_channel::bounded(self.chunk_concurrency);
+        let (completed, results) = crossbeam_channel::bounded(self.chunk_concurrency);
+        thread::scope(|scope| -> Result<(), BackendError> {
+            for _ in 0..self.chunk_concurrency {
+                let work = work.clone();
+                let completed = completed.clone();
+                scope.spawn(move || {
+                    for (index, descriptor) in work {
+                        let result = self.read_or_fetch_chunk(action, index, &descriptor);
+                        if completed.send((index, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(work);
+            drop(completed);
+            let total = manifest.chunks.len();
+            let mut next_scheduled = 0_usize;
+            while next_scheduled < total && next_scheduled < self.chunk_concurrency {
+                jobs.send((next_scheduled, manifest.chunks[next_scheduled].clone()))
+                    .map_err(|_| failure("chunk download worker stopped"))?;
+                next_scheduled += 1;
+            }
+            let mut next_write = 0_usize;
+            let mut pending = BTreeMap::new();
+            while next_write < total {
+                let (index, result) = results
+                    .recv()
+                    .map_err(|_| failure("chunk download worker stopped"))?;
+                pending.insert(index, result?);
+                while let Some(bytes) = pending.remove(&next_write) {
+                    hasher.update(&bytes);
+                    temporary.write_all(&bytes).map_err(|error| {
+                        failure(format!("could not reconstruct download: {error}"))
+                    })?;
+                    next_write += 1;
+                    if next_scheduled < total {
+                        jobs.send((next_scheduled, manifest.chunks[next_scheduled].clone()))
+                            .map_err(|_| failure("chunk download worker stopped"))?;
+                        next_scheduled += 1;
+                    }
+                }
+            }
+            drop(jobs);
+            Ok(())
+        })?;
         let actual: [u8; 32] = hasher.finalize().into();
         if actual.as_slice() != request.oid.as_bytes() {
             return Err(failure("reconstructed download failed SHA-256 validation"));
@@ -217,4 +452,41 @@ fn child_url(base: &str, children: &[&str]) -> Result<Url, BackendError> {
 
 fn failure(message: impl Into<String>) -> BackendError {
     BackendError::new(1, message)
+}
+
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retry_after(response: &reqwest::blocking::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+fn environment_u64(name: &str, default: u64) -> Result<u64, BackendError> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|error| failure(format!("invalid {name}: {error}"))),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(failure(format!("could not read {name}: {error}"))),
+    }
+}
+
+fn environment_usize(name: &str, default: usize) -> Result<usize, BackendError> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|error| failure(format!("invalid {name}: {error}"))),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(failure(format!("could not read {name}: {error}"))),
+    }
 }

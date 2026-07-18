@@ -6,7 +6,7 @@ installing the native `git-cdc` custom transfer agent additionally allows a
 client to upload and download only chunks it does not already share with the
 server.
 
-The project is a usable `0.1.0-beta.1`. Its design and exercised beta
+The project is a production-candidate `0.1.0-beta.2`. Its design and exercised beta
 acceptance criteria are recorded in [the project plan](docs/PROJECT_PLAN.md).
 
 ## Compatibility promise
@@ -27,7 +27,7 @@ acceptance criteria are recorded in [the project plan](docs/PROJECT_PLAN.md).
 - A chunk-aware CDC upload/download protocol with idempotent sessions.
 - PostgreSQL metadata and provider-neutral filesystem, S3/MinIO, Azure, and GCS
   object storage through Apache Arrow's `object_store` crate.
-- Forgejo per-request authorization, generic OIDC/JWKS validation and
+- Forgejo authorization with bounded caching, preview generic OIDC/JWKS validation and
   repository grants, read-only Git reachability reconciliation, and
   conservative grace-period garbage collection.
 - Real PostgreSQL, filesystem, MinIO, HTTP client/server, and stock `git-lfs`
@@ -41,7 +41,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 docker compose -f docker-compose.test.yml up -d postgres minio
 docker compose -f docker-compose.test.yml run --rm minio-init
 GIT_CDC_TEST_DATABASE_URL=postgres://git_cdc:git_cdc@127.0.0.1:55433/git_cdc \
-GIT_CDC_TEST_MINIO=1 cargo test --workspace
+GIT_CDC_TEST_MINIO=1 cargo test --workspace --features git-cdc-server/integration-tests
 ```
 
 The repeatable black-box beta acceptance suite provisions disposable real
@@ -63,12 +63,21 @@ export GIT_CDC_BASE_URL=http://127.0.0.1:8080/
 export GIT_CDC_AUTH_MODE=development
 export GIT_CDC_DEV_TOKEN=replace-this-development-token
 export GIT_CDC_STORAGE_URL=file:///var/lib/git-cdc
+export GIT_CDC_STAGING_DIR=/var/lib/git-cdc/staging
 cargo run -p git-cdc-server
 ```
 
 `GIT_CDC_STORAGE_URL` also accepts `s3://`, `gs://`, and Azure object-store
 URLs; the corresponding provider credentials are read from environment
 variables supported by `object_store`.
+
+Production defaults bound logical objects to 100 GiB, permit two simultaneous
+stock/basic staging operations, and require development authentication to stay
+on a loopback bind. The container binds on `0.0.0.0:8080`, runs as non-root,
+and expects a staging volume sized to at least 240 GiB at the default limits.
+Use `docker-compose.production.yml` with external PostgreSQL and durable
+S3-compatible storage; terminate TLS at the reverse proxy and do not expose
+`/metrics` publicly.
 
 Create repository mappings explicitly with `git-cdc-admin repository-add`. Then
 point a repository's LFS endpoint at

@@ -6,10 +6,10 @@ The server selects exactly one authentication mode with
 `GIT_CDC_AUTH_MODE`. There is no fallback between modes.
 
 - `development`: requires `GIT_CDC_DEV_TOKEN`; local testing only.
-- `forgejo`: requires `GIT_CDC_FORGEJO_URL`. Every request forwards the
-  caller credential to `/api/v1/user` and the specific repository API, so
-  permission changes and token revocation apply immediately.
-- `oidc`: requires `GIT_CDC_OIDC_ISSUER` and `GIT_CDC_OIDC_AUDIENCE`.
+- `forgejo`: requires `GIT_CDC_FORGEJO_URL`. Successful repository decisions
+  are cached for 30 seconds; raw credentials, denials, and failures are not.
+- `oidc` (preview in beta.2): requires `GIT_CDC_OIDC_ISSUER` and
+  `GIT_CDC_OIDC_AUDIENCE`.
   Startup performs discovery and loads JWKS or fails. Tokens require a valid
   signature, issuer, audience, expiry, and a `repository_grants` entry.
 
@@ -55,8 +55,8 @@ Forgejo personal access tokens used for Git-CDC need `read:user` plus
 Repository-specific tokens are supported. Store credentials through Git's
 credential machinery; do not put tokens in the LFS URL. Git-CDC forwards the
 caller's authorization to Forgejo for both the current-user and repository
-permission checks on every request, so revocation and permission changes do
-not wait for a cache to expire.
+permission checks through a bounded cache, so revocation and permission changes
+take effect within 30 seconds while large transfers avoid overwhelming Forgejo.
 
 The integration suite creates a real private Forgejo repository, performs a
 Git push whose LFS object uses CDC, clones and verifies the bytes through CDC,
@@ -93,9 +93,22 @@ Provider failures remain in the same durable cleanup queue for retry.
 ## Health and metrics
 
 - `/healthz` is process liveness.
-- `/readyz` executes a PostgreSQL query and fails when metadata is unavailable.
-- `/metrics` exposes Prometheus counters for logical upload/download bytes and
-  received chunk bytes.
+- `/readyz` checks PostgreSQL plus an object-store write/read/delete probe.
+- `/metrics` exposes logical/physical byte and Forgejo authorization counters.
+  Restrict it to the internal monitoring network at the reverse proxy.
+
+## Production sizing and shutdown
+
+Set `GIT_CDC_STAGING_DIR` to a dedicated filesystem. At the defaults of 100 GiB
+per object and two simultaneous basic transfers, provision at least 240 GiB.
+`GIT_CDC_MAX_BASIC_TRANSFERS` and `GIT_CDC_DATABASE_MAX_CONNECTIONS` default to
+2 and 20. Remote development-auth binds are rejected unless
+`GIT_CDC_ALLOW_REMOTE_DEVELOPMENT_AUTH` is explicitly present.
+
+The server handles SIGINT and SIGTERM. The native client uses two chunk workers
+by default; configure 1-8 with `GIT_CDC_CHUNK_CONCURRENCY`, and tune its
+connection/request deadlines with `GIT_CDC_HTTP_CONNECT_TIMEOUT_SECONDS` and
+`GIT_CDC_HTTP_REQUEST_TIMEOUT_SECONDS`.
 
 ## Backup and restore
 

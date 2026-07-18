@@ -146,16 +146,25 @@ pub async fn collect_due(
     chunks: &ChunkStore,
     repository_id: Uuid,
 ) -> Result<u64, GcError> {
-    let due: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT object_oid FROM object_tombstones \
-         WHERE repository_id = $1 AND delete_after <= now() FOR UPDATE SKIP LOCKED",
-    )
-    .bind(repository_id)
-    .fetch_all(pool)
-    .await?;
     let mut deleted = 0_u64;
-    for oid in due {
+    loop {
         let mut transaction = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(repository_id)
+            .execute(&mut *transaction)
+            .await?;
+        let oid: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT object_oid FROM object_tombstones \
+             WHERE repository_id = $1 AND delete_after <= now() \
+             ORDER BY delete_after FOR UPDATE SKIP LOCKED LIMIT 1",
+        )
+        .bind(repository_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(oid) = oid else {
+            transaction.commit().await?;
+            break;
+        };
         let chunk_ids: Vec<Vec<u8>> = sqlx::query_scalar(
             "SELECT chunk_id FROM object_chunks WHERE repository_id = $1 AND object_oid = $2",
         )

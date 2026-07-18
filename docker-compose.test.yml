@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
     environment:
       POSTGRES_DB: git_cdc
       POSTGRES_USER: git_cdc
@@ -16,7 +16,7 @@ services:
       - /var/lib/postgresql/data
 
   minio:
-    image: quay.io/minio/minio:latest
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: git_cdc
@@ -28,7 +28,7 @@ services:
       - /data
 
   minio-init:
-    image: quay.io/minio/mc:latest
+    image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
       - minio
     entrypoint: /bin/sh
@@ -39,7 +39,7 @@ services:
         mc mb --ignore-existing local/git-cdc-test
 
   forgejo:
-    image: codeberg.org/forgejo/forgejo:15-rootless
+    image: codeberg.org/forgejo/forgejo@sha256:c040958a31ef83643cc2f615150eda5992fb682d06084dc99b2211c9d357fc7e
     environment:
       FORGEJO__database__DB_TYPE: sqlite3
       FORGEJO__security__INSTALL_LOCK: "true"

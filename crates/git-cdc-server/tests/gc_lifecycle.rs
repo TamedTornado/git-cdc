@@ -80,7 +80,11 @@ async fn deletion_requires_two_complete_absent_snapshots_and_expired_grace() {
         1
     );
     let chunks = ChunkStore::new(Arc::new(InMemory::new()));
-    assert_eq!(collect_due(&pool, &chunks, Uuid::nil()).await.unwrap(), 1);
+    let (first, second) = tokio::join!(
+        collect_due(&pool, &chunks, Uuid::nil()),
+        collect_due(&pool, &chunks, Uuid::nil())
+    );
+    assert_eq!(first.unwrap() + second.unwrap(), 1);
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM objects WHERE repository_id = $1)")
             .bind(Uuid::nil())

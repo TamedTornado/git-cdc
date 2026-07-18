@@ -6,6 +6,9 @@ mod profile;
 mod stream;
 
 pub use digest::{ChunkId, ObjectOid};
-pub use manifest::{ChunkDescriptor, ManifestError, ManifestVersion, ObjectManifest};
+pub use manifest::{
+    ChunkDescriptor, MAX_CHUNK_DESCRIPTORS, MAX_OBJECT_SIZE, ManifestError, ManifestVersion,
+    ObjectManifest,
+};
 pub use profile::ChunkingProfile;
 pub use stream::{Chunk, ChunkStream, CoreError};

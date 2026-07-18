@@ -11,9 +11,10 @@ authors.workspace = true
 [dependencies]
 blake3.workspace = true
 clap.workspace = true
+crossbeam-channel.workspace = true
 directories.workspace = true
-git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-beta.1" }
-git-cdc-protocol = { path = "../git-cdc-protocol", version = "0.1.0-beta.1" }
+git-cdc-core = { path = "../git-cdc-core", version = "0.1.0-beta.2" }
+git-cdc-protocol = { path = "../git-cdc-protocol", version = "0.1.0-beta.2" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +22,7 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

@@ -336,6 +336,21 @@ async fn resumed_cdc_session_only_requests_still_missing_chunks() {
     .unwrap();
     assert_eq!(first.upload_id, concurrent.upload_id);
 
+    let mut conflicting = request.clone();
+    conflicting.manifest.chunks[0].length -= 1;
+    conflicting.manifest.chunks[1].offset -= 1;
+    conflicting.manifest.chunks[1].length += 1;
+    let conflict = app
+        .clone()
+        .oneshot(authenticated(
+            "POST",
+            &uri,
+            Body::from(serde_json::to_vec(&conflicting).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
     for _ in 0..2 {
         let response = app
             .clone()

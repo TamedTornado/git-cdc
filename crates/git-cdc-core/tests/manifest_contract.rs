@@ -6,7 +6,7 @@
 
 use std::io::Cursor;
 
-use git_cdc_core::{ChunkStream, ChunkingProfile, ManifestVersion};
+use git_cdc_core::{ChunkStream, ChunkingProfile, MAX_OBJECT_SIZE, ManifestError, ManifestVersion};
 
 fn patterned_bytes(length: usize) -> Vec<u8> {
     (0..length)
@@ -148,4 +148,40 @@ fn accepts_the_canonical_empty_object_manifest() {
         .unwrap();
 
     assert_eq!(manifest.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_resource_amplifying_manifests() {
+    let mut too_large = ChunkStream::new(Cursor::new(Vec::<u8>::new()), ChunkingProfile::beta_v1())
+        .collect_manifest()
+        .unwrap();
+    too_large.object_size = MAX_OBJECT_SIZE + 1;
+    assert!(matches!(
+        too_large.validate(),
+        Err(ManifestError::ObjectTooLarge { .. })
+    ));
+
+    let mut undersized = ChunkStream::new(
+        Cursor::new(patterned_bytes(12 * 1024 * 1024)),
+        ChunkingProfile::beta_v1(),
+    )
+    .collect_manifest()
+    .unwrap();
+    undersized.chunks[0].length = 1;
+    assert!(matches!(
+        undersized.validate(),
+        Err(ManifestError::ChunkTooSmall { .. })
+    ));
+
+    let mut oversized = ChunkStream::new(
+        Cursor::new(patterned_bytes(2 * 1024 * 1024)),
+        ChunkingProfile::beta_v1(),
+    )
+    .collect_manifest()
+    .unwrap();
+    oversized.chunks[0].length = 8 * 1024 * 1024 + 1;
+    assert!(matches!(
+        oversized.validate(),
+        Err(ManifestError::ChunkTooLarge { .. })
+    ));
 }
