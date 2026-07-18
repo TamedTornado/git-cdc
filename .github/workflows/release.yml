@@ -56,7 +56,7 @@ jobs:
           format: spdx-json
           output-file: release/git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.spdx.json
       - name: Attest client archive
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: release/git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
       - name: Upload client artifacts
@@ -107,7 +107,7 @@ jobs:
       - name: Sign image
         run: cosign sign --yes "${IMAGE_NAME}@${{ steps.image.outputs.digest }}"
       - name: Attest image
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.image.outputs.digest }}
