@@ -33,39 +33,49 @@ acceptance criteria are recorded in [the project plan](docs/PROJECT_PLAN.md).
 - Real PostgreSQL, filesystem, MinIO, HTTP client/server, and stock `git-lfs`
   contract coverage. Native CI builds and tests on Linux, macOS, and Windows.
 
-## Build and test
+## Develop, build, and test
+
+The common workflows are Cargo commands; no manual environment setup is
+required:
 
 ```console
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-docker compose -f docker-compose.test.yml up -d postgres minio
-docker compose -f docker-compose.test.yml run --rm minio-init
-GIT_LFS_DELTA_TEST_DATABASE_URL=postgres://git_lfs_delta:git_lfs_delta@127.0.0.1:55433/git_lfs_delta \
-GIT_LFS_DELTA_TEST_MINIO=1 cargo test --workspace --features git-lfs-delta-server/integration-tests
+cargo dev          # PostgreSQL, migrations, and the local server
+cargo build        # all default workspace binaries
+cargo test         # fast infrastructure-free tests
+cargo ci           # formatting, strict lint, and workspace tests
+cargo acceptance   # complete PostgreSQL/MinIO/Forgejo acceptance suite
 ```
 
-The repeatable black-box beta acceptance suite provisions disposable real
-dependencies, runs the complete workspace suite, exercises a private Forgejo
-repository through both Git LFS Delta and stock Git LFS, proves incremental transfer
-and service restart behavior, and verifies PostgreSQL/object-storage recovery:
+`cargo dev` uses `http://127.0.0.1:8080`, the development bearer token
+`git-lfs-delta-local`, filesystem storage under `target/dev`, and a disposable
+PostgreSQL container. Press Ctrl-C to stop the server and run `cargo dev-down`
+when the database is no longer needed.
+
+The black-box acceptance command provisions disposable dependencies, runs the
+complete workspace suite, exercises a private Forgejo repository through both
+Git LFS Delta and stock Git LFS, proves incremental transfer and restart
+behavior, and verifies PostgreSQL/object-storage recovery.
+
+## Production configuration
+
+Local development deliberately has useful defaults. Production fails closed
+and reads its deployment-specific values from the environment. Start from the
+documented template instead of entering them individually:
 
 ```console
-bash tests/acceptance.sh
+cp .env.example .env
+docker compose -f docker-compose.production.yml config
 ```
 
-## Run the server
-
-The server fails closed if any required setting is absent:
+Apply schema migrations as a separate deployment step, then start the service:
 
 ```console
-export GIT_LFS_DELTA_DATABASE_URL=postgres://git_lfs_delta:git_lfs_delta@127.0.0.1:55433/git_lfs_delta
-export GIT_LFS_DELTA_BASE_URL=http://127.0.0.1:8080/
-export GIT_LFS_DELTA_AUTH_MODE=development
-export GIT_LFS_DELTA_DEV_TOKEN=replace-this-development-token
-export GIT_LFS_DELTA_STORAGE_URL=file:///var/lib/git-lfs-delta
-export GIT_LFS_DELTA_STAGING_DIR=/var/lib/git-lfs-delta/staging
-cargo run -p git-lfs-delta-server
+docker compose -f docker-compose.production.yml run --rm migrate
+docker compose -f docker-compose.production.yml up -d git-lfs-delta
 ```
+
+Native deployments use the equivalent `git-lfs-delta-admin migrate`,
+`git-lfs-delta-admin schema-check`, and `git-lfs-delta-server` commands.
 
 `GIT_LFS_DELTA_STORAGE_URL` also accepts `s3://`, `gs://`, and Azure object-store
 URLs; the corresponding provider credentials are read from environment
@@ -77,7 +87,8 @@ on a loopback bind. The container binds on `0.0.0.0:8080`, runs as non-root,
 and expects a staging volume sized to at least 240 GiB at the default limits.
 Use `docker-compose.production.yml` with external PostgreSQL and durable
 S3-compatible storage; terminate TLS at the reverse proxy and do not expose
-`/metrics` publicly.
+`/metrics` publicly. Migration roles, rolling deployment order, rollback, and
+backup procedures are defined in [Operations](docs/OPERATIONS.md).
 
 Create repository mappings explicitly with `git-lfs-delta-admin repository-add`. Then
 point a repository's LFS endpoint at

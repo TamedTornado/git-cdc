@@ -6,6 +6,7 @@ members = [
     "crates/git-lfs-delta-protocol",
     "crates/git-lfs-delta-server",
     "crates/git-lfs-delta-storage",
+    "crates/xtask",
 ]
 
 [workspace.package]

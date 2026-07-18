@@ -1,0 +1,5 @@
+[alias]
+dev = "run --quiet --package xtask -- dev"
+dev-down = "run --quiet --package xtask -- dev-down"
+ci = "run --quiet --package xtask -- ci"
+acceptance = "run --quiet --package xtask -- acceptance"

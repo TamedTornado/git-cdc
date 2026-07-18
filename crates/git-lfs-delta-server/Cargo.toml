@@ -80,5 +80,9 @@ name = "oidc_auth"
 required-features = ["integration-tests"]
 
 [[test]]
+name = "schema_migrations"
+required-features = ["integration-tests"]
+
+[[test]]
 name = "transfer_api"
 required-features = ["integration-tests"]

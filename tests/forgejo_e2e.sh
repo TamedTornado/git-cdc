@@ -70,6 +70,7 @@ export GIT_LFS_DELTA_STORAGE_URL="file://$work/storage"
 export GIT_LFS_DELTA_AUTH_MODE=forgejo
 export GIT_LFS_DELTA_FORGEJO_URL=http://127.0.0.1:53000/
 export GIT_LFS_DELTA_BIND=127.0.0.1:58080
+"$root/target/debug/git-lfs-delta-admin" migrate >/dev/null
 "$root/target/debug/git-lfs-delta-admin" repository-add alice assets >/dev/null
 start_server
 

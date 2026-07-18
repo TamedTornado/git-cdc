@@ -31,4 +31,15 @@ async fn repository_provisioning_is_safely_repeatable() {
     assert!(first.status.success());
     assert!(second.status.success());
     assert_eq!(first.stdout, second.stdout);
+
+    for command in ["migrate-status", "schema-check"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_git-lfs-delta-admin"))
+            .env("GIT_LFS_DELTA_DATABASE_URL", &database_url)
+            .arg(command)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("pending=0"));
+    }
 }

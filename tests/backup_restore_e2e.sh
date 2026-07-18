@@ -50,6 +50,7 @@ export GIT_LFS_DELTA_STORAGE_URL="file://$work/live-storage"
 export GIT_LFS_DELTA_AUTH_MODE=development
 export GIT_LFS_DELTA_DEV_TOKEN=backup-secret
 export GIT_LFS_DELTA_BIND=127.0.0.1:58081
+"$root/target/debug/git-lfs-delta-admin" migrate >/dev/null
 "$root/target/debug/git-lfs-delta-admin" repository-add team assets >/dev/null
 start_server
 

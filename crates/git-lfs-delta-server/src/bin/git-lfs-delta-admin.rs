@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use clap::{Parser, Subcommand};
-use git_lfs_delta_server::{gc, migrate, reconcile};
+use git_lfs_delta_server::{gc, migrate, reconcile, schema_check, schema_status};
 use git_lfs_delta_storage::ChunkStore;
 use object_store::prefix::PrefixStore;
 use sqlx::PgPool;
@@ -24,6 +24,12 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8080/readyz")]
         url: String,
     },
+    /// Applies all pending embedded database migrations under an advisory lock.
+    Migrate,
+    /// Prints the applied, target, pending, and newer migration counts.
+    MigrateStatus,
+    /// Exits successfully only when the schema is compatible with this binary.
+    SchemaCheck,
     /// Creates an explicit repository mapping.
     RepositoryAdd { owner: String, name: String },
     /// Creates or replaces one OIDC subject grant.
@@ -77,9 +83,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let pool = PgPool::connect(&required("GIT_LFS_DELTA_DATABASE_URL")?).await?;
-    migrate(&pool).await?;
+    match &cli.command {
+        Commands::Migrate => {
+            migrate(&pool).await?;
+            let status = schema_check(&pool).await?;
+            print_schema_status(status);
+            return Ok(());
+        }
+        Commands::MigrateStatus => {
+            print_schema_status(schema_status(&pool).await?);
+            return Ok(());
+        }
+        Commands::SchemaCheck => {
+            print_schema_status(schema_check(&pool).await?);
+            return Ok(());
+        }
+        _ => {}
+    }
+    schema_check(&pool).await?;
     match cli.command {
-        Commands::Healthcheck { .. } => return Err("healthcheck dispatch failed".into()),
+        Commands::Healthcheck { .. }
+        | Commands::Migrate
+        | Commands::MigrateStatus
+        | Commands::SchemaCheck => return Err("administrative command dispatch failed".into()),
         Commands::RepositoryAdd { owner, name } => {
             let id = Uuid::new_v4();
             let id: Uuid = sqlx::query_scalar(
@@ -175,6 +201,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn print_schema_status(status: git_lfs_delta_server::SchemaStatus) {
+    println!(
+        "applied={} target={} pending={} newer={}",
+        status.applied_version, status.target_version, status.pending, status.newer
+    );
 }
 
 fn required(name: &str) -> Result<String, Box<dyn std::error::Error>> {

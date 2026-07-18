@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use git_lfs_delta_server::{AppState, build_router, migrate};
+use git_lfs_delta_server::{AppState, build_router, schema_check};
 use git_lfs_delta_storage::ChunkStore;
 use object_store::prefix::PrefixStore;
 use sqlx::postgres::PgPoolOptions;
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .acquire_timeout(Duration::from_secs(5))
         .connect(&database_url)
         .await?;
-    migrate(&pool).await?;
+    schema_check(&pool).await?;
     let (store, prefix) = object_store::parse_url_opts(&storage_url, std::env::vars())?;
     let store = PrefixStore::new(store, prefix);
     let chunks = ChunkStore::new(Arc::new(store));

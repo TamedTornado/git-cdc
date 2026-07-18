@@ -17,6 +17,48 @@ The public service URL, database, storage URL, and bind address use
 `GIT_LFS_DELTA_BASE_URL`, `GIT_LFS_DELTA_DATABASE_URL`, `GIT_LFS_DELTA_STORAGE_URL`, and
 `GIT_LFS_DELTA_BIND` respectively.
 
+## Database schema lifecycle
+
+The server never changes its schema. It performs a read-only compatibility
+check during startup and refuses to listen when a required migration is
+missing, incomplete, or has a changed checksum. Schema changes are an explicit
+deployment operation:
+
+```console
+GIT_LFS_DELTA_DATABASE_URL="$GIT_LFS_DELTA_MIGRATOR_DATABASE_URL" git-lfs-delta-admin migrate-status
+GIT_LFS_DELTA_DATABASE_URL="$GIT_LFS_DELTA_MIGRATOR_DATABASE_URL" git-lfs-delta-admin migrate
+git-lfs-delta-admin schema-check
+```
+
+`migrate` uses PostgreSQL/SQLx advisory locking, a five-second lock timeout,
+and a five-minute statement timeout. It is safe for automation to retry after
+an operator has diagnosed the reported failure. Never edit a migration that
+has shipped; add a new forward migration.
+
+Use separate PostgreSQL roles. The migrator owns the application schema and
+has DDL privileges. The server role receives only `CONNECT`, schema `USAGE`,
+`SELECT` on `_sqlx_migrations`, and the required `SELECT`, `INSERT`, `UPDATE`,
+and `DELETE` privileges on application tables. Ensure future tables receive
+the same grants with `ALTER DEFAULT PRIVILEGES` for the migrator role.
+
+Deploy in this order:
+
+1. Take or verify a recoverable database/object-store backup.
+2. Run `migrate-status` with the new administrative binary.
+3. Run `migrate` once using the migrator role.
+4. Run `schema-check` using the server role.
+5. Roll out the server binary and verify `/readyz` and transfer smoke tests.
+
+Schema changes follow a forward-only expand/contract policy. Add nullable
+columns/tables/indexes first, deploy code that understands both shapes,
+backfill separately in bounded batches, and remove old structures only in a
+later release after every old binary is gone. Large indexes use a SQLx
+non-transactional migration with `CREATE INDEX CONCURRENTLY`; large foreign-key
+or check constraints are added `NOT VALID` and validated separately. A normal
+rollback reverts the application binary while retaining the compatible expanded
+schema. If a migration itself is faulty, ship a tested forward repair migration
+instead of rewriting history or attempting an unreviewed down migration.
+
 ## Provisioning
 
 ```console
@@ -118,7 +160,7 @@ requests to finish, snapshot/copy the configured object-store prefix, and run
 storage may safely contain extra immutable chunks; missing chunks are not safe.
 
 Restore into an empty database and empty object-store prefix, restore object
-bytes first, then PostgreSQL, run migrations by starting the server, and verify
-`/readyz`. Exercise a stock basic download and a CDC download before reopening
-write traffic. Never restore metadata without the corresponding object-store
-snapshot.
+bytes first, then PostgreSQL, run `git-lfs-delta-admin migrate`, and start the
+server only after `git-lfs-delta-admin schema-check` succeeds. Verify `/readyz`,
+a stock basic download, and a CDC download before reopening write traffic.
+Never restore metadata without the corresponding object-store snapshot.

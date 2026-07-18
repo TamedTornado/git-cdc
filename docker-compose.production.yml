@@ -1,6 +1,20 @@
 name: git-lfs-delta
 
 services:
+  migrate:
+    image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:0.1.0-beta.2}
+    profiles: [tools]
+    restart: "no"
+    read_only: true
+    entrypoint: ["/usr/local/bin/git-lfs-delta-admin"]
+    command: ["migrate"]
+    environment:
+      GIT_LFS_DELTA_DATABASE_URL: ${GIT_LFS_DELTA_MIGRATOR_DATABASE_URL:?set privileged migrator PostgreSQL URL}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   git-lfs-delta:
     image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:0.1.0-beta.2}
     restart: unless-stopped

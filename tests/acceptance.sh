@@ -29,6 +29,8 @@ done
 "${compose[@]}" run --rm minio-init
 
 cargo build --locked -p git-lfs-delta -p git-lfs-delta-server --bins
+GIT_LFS_DELTA_DATABASE_URL=postgres://git_lfs_delta:git_lfs_delta@127.0.0.1:55433/git_lfs_delta \
+  "$root/target/debug/git-lfs-delta-admin" migrate
 GIT_LFS_DELTA_TEST_DATABASE_URL=postgres://git_lfs_delta:git_lfs_delta@127.0.0.1:55433/git_lfs_delta \
 GIT_LFS_DELTA_TEST_MINIO=1 cargo test --workspace --locked --features git-lfs-delta-server/integration-tests
 

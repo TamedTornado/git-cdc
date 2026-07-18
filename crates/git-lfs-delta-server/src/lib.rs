@@ -35,7 +35,7 @@ use git_lfs_delta_protocol::{
 use git_lfs_delta_storage::ChunkStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, migrate::Migrator};
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -299,13 +299,152 @@ struct OidcClaims {
     sub: String,
 }
 
-/// Runs all embedded `PostgreSQL` schema migrations.
+/// Ordered schema migrations embedded in every server and administrative binary.
+pub static MIGRATOR: Migrator = sqlx::migrate!();
+
+/// Compatibility state of the connected database schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchemaStatus {
+    /// Latest migration embedded in this binary.
+    pub target_version: i64,
+    /// Latest successfully applied migration, or zero for an empty database.
+    pub applied_version: i64,
+    /// Embedded migrations not yet applied to the database.
+    pub pending: usize,
+    /// Applied migrations newer than this binary.
+    pub newer: usize,
+}
+
+/// Schema migration or compatibility failure.
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    /// `PostgreSQL` could not perform a schema inspection or session setup operation.
+    #[error("database schema operation failed: {0}")]
+    Database(#[from] sqlx::Error),
+    /// `SQLx` rejected or could not apply an embedded migration.
+    #[error("database migration failed: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+    /// An applied migration did not complete successfully.
+    #[error("database has an incomplete migration at version {0}")]
+    Dirty(i64),
+    /// An applied migration was changed after release.
+    #[error("database migration {0} does not match this binary's checksum")]
+    Checksum(i64),
+    /// This binary requires migrations that have not been applied.
+    #[error(
+        "database schema is {pending} migration(s) behind this binary; run git-lfs-delta-admin migrate"
+    )]
+    Pending {
+        /// Number of required migrations not yet applied.
+        pending: usize,
+    },
+}
+
+/// Runs all embedded `PostgreSQL` schema migrations with bounded lock and statement waits.
 ///
 /// # Errors
 ///
-/// Returns the migration failure without starting or mutating HTTP state.
-pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!().run(pool).await
+/// Returns the migration failure without starting or mutating HTTP state further.
+pub async fn migrate(pool: &PgPool) -> Result<(), SchemaError> {
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET lock_timeout = '5s'")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET statement_timeout = '5min'")
+        .execute(&mut *connection)
+        .await?;
+    MIGRATOR.run(&mut *connection).await?;
+    Ok(())
+}
+
+/// Inspects migration history without changing the schema.
+///
+/// Applied migrations newer than this binary are reported but accepted so an
+/// additive expand/contract rollout can briefly run mixed binary versions.
+///
+/// # Errors
+///
+/// Returns database, dirty-history, or checksum failures.
+pub async fn schema_status(pool: &PgPool) -> Result<SchemaStatus, SchemaError> {
+    let target_version = MIGRATOR
+        .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0);
+    let history_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    if !history_exists {
+        return Ok(SchemaStatus {
+            target_version,
+            applied_version: 0,
+            pending: MIGRATOR
+                .iter()
+                .filter(|migration| !migration.migration_type.is_down_migration())
+                .count(),
+            newer: 0,
+        });
+    }
+
+    let applied: Vec<(i64, Vec<u8>, bool)> =
+        sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await?;
+    let mut pending = 0;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
+    {
+        match applied
+            .iter()
+            .find(|(version, _, _)| *version == migration.version)
+        {
+            Some((version, _, false)) => return Err(SchemaError::Dirty(*version)),
+            Some((version, checksum, true))
+                if checksum.as_slice() != migration.checksum.as_ref() =>
+            {
+                return Err(SchemaError::Checksum(*version));
+            }
+            Some(_) => {}
+            None => pending += 1,
+        }
+    }
+    if let Some((version, _, _)) = applied.iter().find(|(_, _, success)| !success) {
+        return Err(SchemaError::Dirty(*version));
+    }
+    let applied_version = applied
+        .iter()
+        .filter(|(_, _, success)| *success)
+        .map(|(version, _, _)| *version)
+        .max()
+        .unwrap_or(0);
+    let newer = applied
+        .iter()
+        .filter(|(version, _, success)| *success && *version > target_version)
+        .count();
+    Ok(SchemaStatus {
+        target_version,
+        applied_version,
+        pending,
+        newer,
+    })
+}
+
+/// Verifies that every schema migration required by this binary is applied.
+///
+/// # Errors
+///
+/// Returns [`SchemaError::Pending`] or a migration-history integrity failure.
+pub async fn schema_check(pool: &PgPool) -> Result<SchemaStatus, SchemaError> {
+    let status = schema_status(pool).await?;
+    if status.pending > 0 {
+        return Err(SchemaError::Pending {
+            pending: status.pending,
+        });
+    }
+    Ok(status)
 }
 
 /// Builds the public HTTP router for one configured service instance.
