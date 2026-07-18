@@ -115,7 +115,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn install(scope: Scope) -> Result<(), Box<dyn std::error::Error>> {
     require_command("git", &["--version"])?;
     require_command("git-lfs", &["version"])?;
-    let executable = std::env::current_exe()?;
+    let executable = fs::canonicalize(std::env::current_exe()?)?;
     let flag = match scope {
         Scope::Local => "--local",
         Scope::Global => "--global",
@@ -193,14 +193,47 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
 fn doctor() -> Result<(), Box<dyn std::error::Error>> {
     require_command("git", &["--version"])?;
     require_command("git-lfs", &["version"])?;
+    let executable = fs::canonicalize(std::env::current_exe()?)?;
+    let configured = git_config_value("lfs.customtransfer.cdc.path")?
+        .ok_or("Git LFS Delta transfer agent is not registered")?;
+    let configured_path = fs::canonicalize(&configured).map_err(|error| {
+        format!("configured transfer path {configured:?} is unavailable: {error}")
+    })?;
+    if configured_path != executable {
+        return Err(format!(
+            "configured transfer path {} does not match this executable {}; rerun install",
+            configured_path.display(),
+            executable.display()
+        )
+        .into());
+    }
     let cache = cache_root()?;
     fs::create_dir_all(&cache)?;
     let probe = tempfile::NamedTempFile::new_in(&cache)?;
     drop(probe);
+    write_output(format_args!("Git LFS Delta: {}", env!("CARGO_PKG_VERSION")))?;
+    write_output(format_args!("executable: {}", executable.display()))?;
+    write_output(format_args!(
+        "transfer registration: {}",
+        configured_path.display()
+    ))?;
     write_output(format_args!("Git: ok"))?;
     write_output(format_args!("Git LFS: ok"))?;
     write_output(format_args!("cache: {} (writable)", cache.display()))?;
     Ok(())
+}
+
+fn git_config_value(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["config", "--get", key])
+        .output()?;
+    if output.status.success() {
+        return Ok(Some(String::from_utf8(output.stdout)?.trim().to_owned()));
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(format!("git config could not read {key}").into())
 }
 
 fn git_config(scope: &str, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {

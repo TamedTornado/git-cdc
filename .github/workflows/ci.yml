@@ -21,11 +21,21 @@ jobs:
       - run: cargo check --workspace --all-targets --locked
 
   native:
-    name: Native (${{ matrix.os }})
+    name: Native (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - name: Linux x86-64
+            os: ubuntu-latest
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+          - name: macOS Intel
+            os: macos-15-intel
+          - name: macOS Apple Silicon
+            os: macos-14
+          - name: Windows x86-64
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +52,38 @@ jobs:
         run: cargo build --workspace --all-targets --locked
       - name: Cross-platform contracts
         run: cargo test --locked -p git-lfs-delta-core -p git-lfs-delta-protocol -p git-lfs-delta-storage -p git-lfs-delta
+
+  release-dry-run:
+    name: Release dry run (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Build and exercise release package
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo release-check v0.1.0-beta.2
+          cargo build --release --locked -p git-lfs-delta --bin git-lfs-delta --target "${{ matrix.target }}"
+          scripts/package-client.sh "${{ matrix.target }}" v0.1.0-beta.2 release
+          tests/client_installer.sh release "${{ matrix.target }}"
 
   integration:
     name: PostgreSQL, MinIO, and HTTP integration

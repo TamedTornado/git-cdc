@@ -22,23 +22,80 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let task = env::args().nth(1).unwrap_or_else(|| "help".into());
+    let mut arguments = env::args().skip(1);
+    let task = arguments.next().unwrap_or_else(|| "help".into());
     let root = workspace_root()?;
     match task.as_str() {
         "dev" => dev(&root),
         "dev-down" => compose(&root, &["down", "--remove-orphans"]),
         "ci" => ci(&root),
         "acceptance" => command(&root, "bash", &["tests/acceptance.sh"], &[]),
+        "release-check" => {
+            let tag = arguments
+                .next()
+                .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")));
+            if arguments.next().is_some() {
+                return Err("release-check accepts at most one tag".into());
+            }
+            release_check(&root, &tag)
+        }
         "help" | "--help" | "-h" => {
             println!(
                 "cargo dev         start dependencies, migrate, and run the local server\n\
                  cargo dev-down    stop disposable local dependencies\n\
                  cargo ci          run formatting, lint, and workspace tests\n\
-                 cargo acceptance  run the full Docker-backed acceptance suite"
+                 cargo acceptance  run the full Docker-backed acceptance suite\n\
+                 cargo release-check [TAG]\n\
+                                    validate release metadata before publishing"
             );
             Ok(())
         }
         other => Err(format!("unknown task {other:?}; run `cargo run -p xtask -- help`").into()),
+    }
+}
+
+fn release_check(root: &Path, tag: &str) -> Result<(), Box<dyn Error>> {
+    let version = env!("CARGO_PKG_VERSION");
+    let expected_tag = format!("v{version}");
+    if tag != expected_tag {
+        return Err(format!(
+            "release tag {tag:?} does not match workspace version {expected_tag:?}"
+        )
+        .into());
+    }
+
+    require_text(
+        root,
+        "scripts/install.sh",
+        &format!("DEFAULT_VERSION='{expected_tag}'"),
+    )?;
+    require_text(root, "CHANGELOG.md", &format!("## [{version}]"))?;
+    require_text(
+        root,
+        "docker-compose.production.yml",
+        &format!("ghcr.io/tamedtornado/git-lfs-delta:{expected_tag}"),
+    )?;
+    require_text(
+        root,
+        ".env.example",
+        &format!("ghcr.io/tamedtornado/git-lfs-delta:{expected_tag}"),
+    )?;
+    for path in ["CLIENT-README.md", "scripts/package-client.sh"] {
+        if !root.join(path).is_file() {
+            return Err(format!("required release file is missing: {path}").into());
+        }
+    }
+
+    println!("release metadata is consistent for {expected_tag}");
+    Ok(())
+}
+
+fn require_text(root: &Path, path: &str, expected: &str) -> Result<(), Box<dyn Error>> {
+    let contents = fs::read_to_string(root.join(path))?;
+    if contents.contains(expected) {
+        Ok(())
+    } else {
+        Err(format!("{path} does not contain expected release value {expected:?}").into())
     }
 }
 

@@ -5,90 +5,136 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: ghcr.io/tamedtornado/git-lfs-delta
 
 jobs:
   binaries:
+    name: Client (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: macos-13
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked --workspace --bins --target ${{ matrix.target }}
-      - name: Package Unix binaries
-        if: runner.os != 'Windows'
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Validate release metadata
+        run: cargo release-check "${GITHUB_REF_NAME}"
+      - name: Build client
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo build --release --locked -p git-lfs-delta --bin git-lfs-delta --target "${{ matrix.target }}"
+      - name: Verify and package client
         shell: bash
         run: |
-          mkdir -p release
-          cp target/${{ matrix.target }}/release/git-lfs-delta release/
-          cp target/${{ matrix.target }}/release/git-lfs-delta-server release/
-          cp target/${{ matrix.target }}/release/git-lfs-delta-admin release/
-          tar -C release -czf git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.tar.gz .
-          shasum -a 256 git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.sha256
-      - name: Package Windows binaries
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path release
-          Copy-Item target/${{ matrix.target }}/release/git-lfs-delta.exe release/
-          Copy-Item target/${{ matrix.target }}/release/git-lfs-delta-server.exe release/
-          Copy-Item target/${{ matrix.target }}/release/git-lfs-delta-admin.exe release/
-          Compress-Archive release/* git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.zip
-          (Get-FileHash git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower() + "  git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.zip" | Out-File git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.sha256
-      - uses: anchore/sbom-action@v0
+          target/${{ matrix.target }}/release/git-lfs-delta --version
+          scripts/package-client.sh "${{ matrix.target }}" "${GITHUB_REF_NAME}" release
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          path: target/${{ matrix.target }}/release
+          file: target/${{ matrix.target }}/release/git-lfs-delta
           format: spdx-json
-          output-file: git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.spdx.json
-      - uses: softprops/action-gh-release@v2
+          output-file: release/git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.spdx.json
+      - name: Attest client archive
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          files: |
-            git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.*
+          subject-path: release/git-lfs-delta-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+      - name: Upload client artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: client-${{ matrix.target }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
 
   image:
+    name: Server container
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        id: image
+      - id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=raw,value=beta
+      - id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
           sbom: true
           provenance: mode=max
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Sign image
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}
-      - uses: actions/attest-build-provenance@v2
+        run: cosign sign --yes "${IMAGE_NAME}@${{ steps.image.outputs.digest }}"
+      - name: Attest image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+
+  release:
+    name: Publish GitHub release
+    needs: [binaries, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: client-*
+          path: dist
+          merge-multiple: true
+      - name: Add installer and checksum
+        run: |
+          cp scripts/install.sh dist/install.sh
+          cd dist
+          sha256sum install.sh > install.sh.sha256
+      - name: Publish one complete prerelease
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

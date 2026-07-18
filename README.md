@@ -9,6 +9,24 @@ server.
 The project is a production-candidate `0.1.0-beta.2`. Its design and exercised beta
 acceptance criteria are recorded in [the project plan](docs/PROJECT_PLAN.md).
 
+## Install the client
+
+The internal beta client is released for Apple Silicon macOS, Intel macOS, and
+x86-64 Linux. The installer verifies the archive checksum, verifies GitHub build
+provenance automatically when `gh` is available, installs to `$HOME/.local/bin`,
+and registers the Git LFS custom transfer globally:
+
+```console
+curl --proto '=https' --tlsv1.2 -fsSLO https://github.com/TamedTornado/git-lfs-delta/releases/download/v0.1.0-beta.2/install.sh
+sh install.sh
+git-lfs-delta doctor
+```
+
+Use `--prefix`, `--no-register`, or `--verify-provenance` when a non-default
+installation is needed. Windows and Linux ARM are compile-tested but are not
+published as client artifacts in this beta. See the release's checksums, SPDX
+SBOMs, and provenance attestations when auditing a client download.
+
 ## Compatibility promise
 
 - Git remains the version-control system.
@@ -44,6 +62,7 @@ cargo build        # all default workspace binaries
 cargo test         # fast infrastructure-free tests
 cargo ci           # formatting, strict lint, and workspace tests
 cargo acceptance   # complete PostgreSQL/MinIO/Forgejo acceptance suite
+cargo release-check # release tag, changelog, installer, and image consistency
 ```
 
 `cargo dev` uses `http://127.0.0.1:8080`, the development bearer token

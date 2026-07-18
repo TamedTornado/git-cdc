@@ -2,7 +2,7 @@ name: git-lfs-delta
 
 services:
   migrate:
-    image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:0.1.0-beta.2}
+    image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:v0.1.0-beta.2}
     profiles: [tools]
     restart: "no"
     read_only: true
@@ -16,7 +16,7 @@ services:
       - ALL
 
   git-lfs-delta:
-    image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:0.1.0-beta.2}
+    image: ${GIT_LFS_DELTA_IMAGE:-ghcr.io/tamedtornado/git-lfs-delta:v0.1.0-beta.2}
     restart: unless-stopped
     read_only: true
     environment:
